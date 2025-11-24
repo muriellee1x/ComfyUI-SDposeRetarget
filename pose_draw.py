@@ -19,7 +19,7 @@ def draw_wholebody_keypoints_openpose_style(canvas, keypoints, scores=None, thre
         stickwidth = base_stickwidth * xinsr_stick_scale
         # print(f"SDPose Node: Applying Xinsr scale ({xinsr_stick_scale:.1f}) to stickwidth. New width: {stickwidth}") # Debug print
 
-    body_limbSeq = [[2, 3], [2, 6], [3, 4], [4, 5], [6, 7], [7, 8], [2, 9], [9, 10], [10, 11], [2, 12], [12, 13], [13, 14], [2, 1], [1, 15], [15, 17], [1, 16], [16, 18]]
+    body_limbSeq = [[2, 3], [2, 6], [3, 4], [4, 5], [6, 7], [7, 8], [2, 9], [9, 10], [10, 11], [2, 12], [12, 13], [13, 14], [2, 1], [1, 15], [15, 17], [1, 16], [16, 18], [3, 17], [6, 18]]
     hand_edges = [[0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 8], [0, 9], [9, 10], [10, 11], [11, 12], [0, 13], [13, 14], [14, 15], [15, 16], [0, 17], [17, 18], [18, 19], [19, 20]]
     colors = [[255, 0, 0], [255, 85, 0], [255, 170, 0], [255, 255, 0], [170, 255, 0], [85, 255, 0], [0, 255, 0], [0, 255, 85], [0, 255, 170], [0, 255, 255], [0, 170, 255], [0, 85, 255], [0, 0, 255], [85, 0, 255], [170, 0, 255], [255, 0, 255], [255, 0, 170], [255, 0, 85]]
 
@@ -168,6 +168,29 @@ def draw_pose_frame(pose_data, width, height, threshold=0.4):
                 kpts_full[15] = body_arr[1, :2]; scores_full[15] = body_arr[1, 2] # LEye
                 kpts_full[16] = body_arr[4, :2]; scores_full[16] = body_arr[4, 2] # REar
                 kpts_full[17] = body_arr[3, :2]; scores_full[17] = body_arr[3, 2] # LEar
+
+            # Feet (Indices 17-22 in COCO 17/WholeBody format are sometimes appended)
+            # Our Retarget node might append feet (indices 17,18,19,20,21,22) to the body array.
+            # COCO WholeBody Feet indices: 18:LBigToe, 19:LSmallToe, 20:LHeel, 21:RBigToe, 22:RSmallToe, 23:RHeel
+            # If input has > 17 points, map them.
+            if len(body_arr) >= 23:
+                 # COCO17 with Feet:
+                 # 17: LBigToe, 18: LSmallToe, 19: LHeel
+                 # 20: RBigToe, 21: RSmallToe, 22: RHeel
+                 
+                 # Map to WholeBody:
+                 # 18: LBigToe, 19: LSmallToe, 20: LHeel
+                 # 21: RBigToe, 22: RSmallToe, 23: RHeel
+                 
+                 # Left Foot
+                 kpts_full[18] = body_arr[17, :2]; scores_full[18] = body_arr[17, 2]
+                 kpts_full[19] = body_arr[18, :2]; scores_full[19] = body_arr[18, 2]
+                 kpts_full[20] = body_arr[19, :2]; scores_full[20] = body_arr[19, 2]
+                 
+                 # Right Foot
+                 kpts_full[21] = body_arr[20, :2]; scores_full[21] = body_arr[20, 2]
+                 kpts_full[22] = body_arr[21, :2]; scores_full[22] = body_arr[21, 2]
+                 kpts_full[23] = body_arr[22, :2]; scores_full[23] = body_arr[22, 2]
 
         # 2. Hands
         # Right Hand
