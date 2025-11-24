@@ -2,159 +2,93 @@ import numpy as np
 import cv2
 import math
 import torch
+import matplotlib.colors
 
-# OpenPose Keypoint Colors and Pairs
-
-# Body 25 / COCO 18?
-# We focus on COCO 18 (17 + Neck) or Body 25.
-# Common OpenPose Body 18:
-# 0:Nose, 1:Neck, 2:RShoulder, 3:RElbow, 4:RWrist, 5:LShoulder, 6:LElbow, 7:LWrist
-# 8:RHip, 9:RKnee, 10:RAnkle, 11:LHip, 12:LKnee, 13:LAnkle, 14:REye, 15:LEye, 16:REar, 17:LEar
-# 18: Bkg?
-# 
-# But our data is COCO 17 (0:Nose, ..., 5:LShoulder, 6:RShoulder ...).
-# Note: retarget_pose.py uses:
-# 0: Nose, 1: LEye, 2: REye, 3: LEar, 4: REar
-# 5: LShoulder, 6: RShoulder, 7: LElbow, 8: RElbow ...
-# This matches COCO output from many OpenPose implementations.
-
-# COCO 17 Pairs
-BODY_PAIRS = [
-    (0, 1), (0, 2), (1, 3), (2, 4), # Face
-    (5, 6), # Shoulders
-    (5, 7), (7, 9), # Left Arm
-    (6, 8), (8, 10), # Right Arm
-    (11, 12), # Hips
-    (11, 13), (13, 15), # Left Leg
-    (12, 14), (14, 16), # Right Leg
-    (5, 11), (6, 12) # Torso
-]
-
-# Colors (BGR)
-COLORS = [
-    (255, 0, 0), (255, 85, 0), (255, 170, 0), (255, 255, 0),
-    (170, 255, 0), (85, 255, 0), (0, 255, 0), (0, 255, 85),
-    (0, 255, 170), (0, 255, 255), (0, 170, 255), (0, 85, 255),
-    (0, 0, 255), (85, 0, 255), (170, 0, 255), (255, 0, 255),
-    (255, 0, 170), (255, 0, 85)
-]
-
-# Hand Pairs (21 points)
-# 0: Wrist
-# Thumb: 1,2,3,4
-# Index: 5,6,7,8
-# Middle: 9,10,11,12
-# Ring: 13,14,15,16
-# Pinky: 17,18,19,20
-HAND_PAIRS = [
-    (0, 1), (1, 2), (2, 3), (3, 4),
-    (0, 5), (5, 6), (6, 7), (7, 8),
-    (0, 9), (9, 10), (10, 11), (11, 12),
-    (0, 13), (13, 14), (14, 15), (15, 16),
-    (0, 17), (17, 18), (18, 19), (19, 20)
-]
-
-def draw_body(canvas, keypoints, threshold=0.4):
-    """
-    Draws COCO 17 body keypoints.
-    """
+def draw_wholebody_keypoints_openpose_style(canvas, keypoints, scores=None, threshold=0.3, overlay_mode=False, overlay_alpha=0.6, scale_for_xinsr=False):
     H, W, C = canvas.shape
-    
-    # Check if keypoints are normalized (0-1) and denormalize if so
-    if keypoints.size > 0:
-        max_val = np.max(keypoints[:, :2])
-        if max_val <= 1.0 and max_val > 0:
-            keypoints = keypoints.copy()
-            keypoints[:, 0] *= W
-            keypoints[:, 1] *= H
 
-    # Draw Lines
-    for i, (p1_idx, p2_idx) in enumerate(BODY_PAIRS):
-        if p1_idx >= len(keypoints) or p2_idx >= len(keypoints):
-            continue
+    # --- 计算基础粗细 (使用固定值4作为基准) ---
+    base_stickwidth = 4 
+    stickwidth = base_stickwidth # 默认值
+
+    # --- 应用 xinsr 缩放 ---
+    if scale_for_xinsr:
+        target_max_side = max(H, W) # 使用图像最大边长
+        # 借用 OpenPose Editor 的公式
+        xinsr_stick_scale = 1 if target_max_side < 500 else min(2 + (target_max_side // 1000), 7)
+        stickwidth = base_stickwidth * xinsr_stick_scale
+        # print(f"SDPose Node: Applying Xinsr scale ({xinsr_stick_scale:.1f}) to stickwidth. New width: {stickwidth}") # Debug print
+
+    body_limbSeq = [[2, 3], [2, 6], [3, 4], [4, 5], [6, 7], [7, 8], [2, 9], [9, 10], [10, 11], [2, 12], [12, 13], [13, 14], [2, 1], [1, 15], [15, 17], [1, 16], [16, 18]]
+    hand_edges = [[0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 8], [0, 9], [9, 10], [10, 11], [11, 12], [0, 13], [13, 14], [14, 15], [15, 16], [0, 17], [17, 18], [18, 19], [19, 20]]
+    colors = [[255, 0, 0], [255, 85, 0], [255, 170, 0], [255, 255, 0], [170, 255, 0], [85, 255, 0], [0, 255, 0], [0, 255, 85], [0, 255, 170], [0, 255, 255], [0, 170, 255], [0, 85, 255], [0, 0, 255], [85, 0, 255], [170, 0, 255], [255, 0, 255], [255, 0, 170], [255, 0, 85]]
+
+    if len(keypoints) >= 18:
+        for i, limb in enumerate(body_limbSeq):
+            idx1, idx2 = limb[0] - 1, limb[1] - 1
+            if idx1 >= 18 or idx2 >= 18: continue
+            if scores is not None and (scores[idx1] < threshold or scores[idx2] < threshold): continue
             
-        p1 = keypoints[p1_idx]
-        p2 = keypoints[p2_idx]
-        
-        if p1[2] < threshold or p2[2] < threshold:
-            continue
-            
-        x1, y1 = int(p1[0]), int(p1[1])
-        x2, y2 = int(p2[0]), int(p2[1])
-        
-        color = COLORS[i % len(COLORS)]
-        cv2.line(canvas, (x1, y1), (x2, y2), color, 3)
+            Y = np.array([keypoints[idx1][0], keypoints[idx2][0]]); X = np.array([keypoints[idx1][1], keypoints[idx2][1]]); mX = np.mean(X); mY = np.mean(Y)
+            length = ((X[0] - X[1]) ** 2 + (Y[0] - Y[1]) ** 2) ** 0.5
+            if length < 1: continue
+            angle = math.degrees(math.atan2(X[0] - X[1], Y[0] - Y[1]))
+            polygon = cv2.ellipse2Poly((int(mY), int(mX)), (int(length / 2), stickwidth), int(angle), 0, 360, 1)
+            cv2.fillConvexPoly(canvas, polygon, colors[i % len(colors)])
 
-    # Draw Points
-    for i, p in enumerate(keypoints):
-        if i >= 18: break # Limit to 18 points for body
-        if p[2] < threshold: continue
-        x, y = int(p[0]), int(p[1])
-        cv2.circle(canvas, (x, y), 4, COLORS[i % len(COLORS)], -1)
+        for i in range(18):
+            if scores is not None and scores[i] < threshold: continue
+            x, y = int(keypoints[i][0]), int(keypoints[i][1])
+            if 0 <= x < W and 0 <= y < H: cv2.circle(canvas, (x, y), 4, colors[i % len(colors)], thickness=-1)
 
-    # Draw Feet (17-22 if present)
-    # 17:LBigToe, 18:LSmallToe, 19:LHeel
-    # 20:RBigToe, 21:RSmallToe, 22:RHeel
-    # Connect Ankle(15) to Heel(19) and BigToe(17)
-    # Connect Ankle(16) to Heel(22) and BigToe(20)
-    # Connect Heel to Toe?
-    if len(keypoints) > 22:
-        feet_pairs = [
-            (15, 19), (19, 17), (17, 18), # Left Foot
-            (16, 22), (22, 20), (20, 21)  # Right Foot
-        ]
-        for p1_idx, p2_idx in feet_pairs:
-            if p1_idx < len(keypoints) and p2_idx < len(keypoints):
-                p1, p2 = keypoints[p1_idx], keypoints[p2_idx]
-                if p1[2] >= threshold and p2[2] >= threshold:
-                    cv2.line(canvas, (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1])), (0, 255, 255), 2)
-                    
-        for i in range(17, 23):
-            if i < len(keypoints) and keypoints[i][2] >= threshold:
-                cv2.circle(canvas, (int(keypoints[i][0]), int(keypoints[i][1])), 3, (0, 255, 255), -1)
+    if len(keypoints) >= 24:
+        for i in range(18, 24):
+            if scores is not None and scores[i] < threshold: continue
+            x, y = int(keypoints[i][0]), int(keypoints[i][1])
+            if 0 <= x < W and 0 <= y < H: cv2.circle(canvas, (x, y), 4, colors[i % len(colors)], thickness=-1)
 
-def draw_hand(canvas, keypoints, threshold=0.4):
-    """
-    Draws Hand Keypoints.
-    """
-    if keypoints is None or len(keypoints) < 21:
-        return
+    if len(keypoints) >= 113:
+        for ie, edge in enumerate(hand_edges):
+            idx1, idx2 = 92 + edge[0], 92 + edge[1]
+            if scores is not None and (scores[idx1] < threshold or scores[idx2] < threshold): continue
+            x1, y1 = int(keypoints[idx1][0]), int(keypoints[idx1][1]); x2, y2 = int(keypoints[idx2][0]), int(keypoints[idx2][1])
+            if x1 > 0.01 and y1 > 0.01 and x2 > 0.01 and y2 > 0.01 and 0 <= x1 < W and 0 <= y1 < H and 0 <= x2 < W and 0 <= y2 < H:
+                color = matplotlib.colors.hsv_to_rgb([ie / float(len(hand_edges)), 1.0, 1.0]) * 255
+                cv2.line(canvas, (x1, y1), (x2, y2), color, thickness=2)
 
-    H, W, C = canvas.shape
-    
-    # Check if keypoints are normalized (0-1) and denormalize if so
-    if keypoints.size > 0:
-        max_val = np.max(keypoints[:, :2])
-        if max_val <= 1.0 and max_val > 0:
-            keypoints = keypoints.copy()
-            keypoints[:, 0] *= W
-            keypoints[:, 1] *= H
+        for i in range(92, 113):
+            if scores is not None and scores[i] < threshold: continue
+            x, y = int(keypoints[i][0]), int(keypoints[i][1])
+            if x > 0.01 and y > 0.01 and 0 <= x < W and 0 <= y < H: cv2.circle(canvas, (x, y), 4, (0, 0, 255), thickness=-1)
 
-    # Draw Lines
-    for p1_idx, p2_idx in HAND_PAIRS:
-        p1 = keypoints[p1_idx]
-        p2 = keypoints[p2_idx]
-        
-        if p1[2] < threshold or p2[2] < threshold:
-            continue
-            
-        x1, y1 = int(p1[0]), int(p1[1])
-        x2, y2 = int(p2[0]), int(p2[1])
-        
-        cv2.line(canvas, (x1, y1), (x2, y2), (0, 0, 255), 2) # Red color for hands usually? Or multi-colored.
+    if len(keypoints) >= 134:
+        for ie, edge in enumerate(hand_edges):
+            idx1, idx2 = 113 + edge[0], 113 + edge[1]
+            if scores is not None and (scores[idx1] < threshold or scores[idx2] < threshold): continue
+            x1, y1 = int(keypoints[idx1][0]), int(keypoints[idx1][1]); x2, y2 = int(keypoints[idx2][0]), int(keypoints[idx2][1])
+            if x1 > 0.01 and y1 > 0.01 and x2 > 0.01 and y2 > 0.01 and 0 <= x1 < W and 0 <= y1 < H and 0 <= x2 < W and 0 <= y2 < H:
+                color = matplotlib.colors.hsv_to_rgb([ie / float(len(hand_edges)), 1.0, 1.0]) * 255
+                cv2.line(canvas, (x1, y1), (x2, y2), color, thickness=2)
 
-    # Draw Points
-    for p in keypoints:
-        if p[2] < threshold: continue
-        x, y = int(p[0]), int(p[1])
-        cv2.circle(canvas, (x, y), 3, (0, 255, 0), -1)
+        for i in range(113, 134):
+            if scores is not None and i < len(scores) and scores[i] < threshold: continue
+            x, y = int(keypoints[i][0]), int(keypoints[i][1])
+            if x > 0.01 and y > 0.01 and 0 <= x < W and 0 <= y < H: cv2.circle(canvas, (x, y), 4, (0, 0, 255), thickness=-1)
+
+    if len(keypoints) >= 92:
+        for i in range(24, 92):
+            if scores is not None and scores[i] < threshold: continue
+            x, y = int(keypoints[i][0]), int(keypoints[i][1])
+            if x > 0.01 and y > 0.01 and 0 <= x < W and 0 <= y < H: cv2.circle(canvas, (x, y), 3, (255, 255, 255), thickness=-1)
+
+    return canvas
 
 def draw_pose_frame(pose_data, width, height, threshold=0.4):
     """
-    Draws a single frame of pose data.
+    Draws a single frame of pose data using OpenPose style.
+    Converts COCO 17 + Hands to WholeBody format (134 points).
     """
     # Initialize black canvas
-    # Ensure dimensions are valid
     if width <= 0: width = 512
     if height <= 0: height = 512
     
@@ -167,23 +101,107 @@ def draw_pose_frame(pose_data, width, height, threshold=0.4):
         return canvas
         
     for person in pose_data["people"]:
-        # Draw Body
+        # --- Prepare WholeBody Arrays ---
+        # Format:
+        # 0-17: Body 18 (COCO 18)
+        # 18-23: Feet (6)
+        # 24-91: Face (68) - Not supported yet
+        # 92-112: Right Hand (21)
+        # 113-133: Left Hand (21)
+        # Total: 134
+        
+        kpts_full = np.zeros((134, 2), dtype=np.float32)
+        scores_full = np.zeros((134,), dtype=np.float32)
+        
+        # 1. Parse Body (COCO 17 -> Body 18)
         body_kpts = person.get("pose_keypoints_2d", [])
         if body_kpts:
             body_arr = np.array(body_kpts).reshape(-1, 3)
-            draw_body(canvas, body_arr, threshold)
             
-        # Draw Left Hand
-        lh_kpts = person.get("hand_left_keypoints_2d", [])
-        if lh_kpts:
-            lh_arr = np.array(lh_kpts).reshape(-1, 3)
-            draw_hand(canvas, lh_arr, threshold)
+            # Check/Fix Normalization
+            if body_arr.size > 0:
+                max_val = np.max(body_arr[:, :2])
+                if max_val <= 1.0 and max_val > 0:
+                    body_arr[:, 0] *= width
+                    body_arr[:, 1] *= height
             
-        # Draw Right Hand
+            if len(body_arr) >= 17:
+                # Map COCO 17 to Body 18
+                # 0:Nose, 1:LEye, 2:REye, 3:LEar, 4:REar
+                # 5:LSho, 6:RSho, 7:LElb, 8:RElb, 9:LWri, 10:RWri
+                # 11:LHip, 12:RHip, 13:LKnee, 14:RKnee, 15:LAnk, 16:RAnk
+                
+                # Target: 0:Nose, 1:Neck, 2:RSho, 3:RElb, 4:RWri, 5:LSho, 6:LElb, 7:LWri
+                # 8:RHip, 9:RKnee, 10:RAnk, 11:LHip, 12:LKnee, 13:LAnk
+                # 14:REye, 15:LEye, 16:REar, 17:LEar
+                
+                # Nose
+                kpts_full[0] = body_arr[0, :2]; scores_full[0] = body_arr[0, 2]
+                
+                # Neck = Avg(LSho, RSho)
+                if body_arr[5, 2] > 0 and body_arr[6, 2] > 0:
+                    kpts_full[1] = (body_arr[5, :2] + body_arr[6, :2]) / 2
+                    scores_full[1] = min(body_arr[5, 2], body_arr[6, 2])
+                
+                # Right Arm
+                kpts_full[2] = body_arr[6, :2]; scores_full[2] = body_arr[6, 2]
+                kpts_full[3] = body_arr[8, :2]; scores_full[3] = body_arr[8, 2]
+                kpts_full[4] = body_arr[10, :2]; scores_full[4] = body_arr[10, 2]
+                
+                # Left Arm
+                kpts_full[5] = body_arr[5, :2]; scores_full[5] = body_arr[5, 2]
+                kpts_full[6] = body_arr[7, :2]; scores_full[6] = body_arr[7, 2]
+                kpts_full[7] = body_arr[9, :2]; scores_full[7] = body_arr[9, 2]
+                
+                # Right Leg
+                kpts_full[8] = body_arr[12, :2]; scores_full[8] = body_arr[12, 2]
+                kpts_full[9] = body_arr[14, :2]; scores_full[9] = body_arr[14, 2]
+                kpts_full[10] = body_arr[16, :2]; scores_full[10] = body_arr[16, 2]
+                
+                # Left Leg
+                kpts_full[11] = body_arr[11, :2]; scores_full[11] = body_arr[11, 2]
+                kpts_full[12] = body_arr[13, :2]; scores_full[12] = body_arr[13, 2]
+                kpts_full[13] = body_arr[15, :2]; scores_full[13] = body_arr[15, 2]
+                
+                # Eyes/Ears
+                kpts_full[14] = body_arr[2, :2]; scores_full[14] = body_arr[2, 2] # REye
+                kpts_full[15] = body_arr[1, :2]; scores_full[15] = body_arr[1, 2] # LEye
+                kpts_full[16] = body_arr[4, :2]; scores_full[16] = body_arr[4, 2] # REar
+                kpts_full[17] = body_arr[3, :2]; scores_full[17] = body_arr[3, 2] # LEar
+
+        # 2. Hands
+        # Right Hand
         rh_kpts = person.get("hand_right_keypoints_2d", [])
         if rh_kpts:
             rh_arr = np.array(rh_kpts).reshape(-1, 3)
-            draw_hand(canvas, rh_arr, threshold)
+             # Check/Fix Normalization
+            if rh_arr.size > 0:
+                max_val = np.max(rh_arr[:, :2])
+                if max_val <= 1.0 and max_val > 0:
+                    rh_arr[:, 0] *= width
+                    rh_arr[:, 1] *= height
+                    
+            if len(rh_arr) >= 21:
+                kpts_full[92:113] = rh_arr[:21, :2]
+                scores_full[92:113] = rh_arr[:21, 2]
+                
+        # Left Hand
+        lh_kpts = person.get("hand_left_keypoints_2d", [])
+        if lh_kpts:
+            lh_arr = np.array(lh_kpts).reshape(-1, 3)
+             # Check/Fix Normalization
+            if lh_arr.size > 0:
+                max_val = np.max(lh_arr[:, :2])
+                if max_val <= 1.0 and max_val > 0:
+                    lh_arr[:, 0] *= width
+                    lh_arr[:, 1] *= height
+                    
+            if len(lh_arr) >= 21:
+                kpts_full[113:134] = lh_arr[:21, :2]
+                scores_full[113:134] = lh_arr[:21, 2]
+        
+        # Draw
+        draw_wholebody_keypoints_openpose_style(canvas, kpts_full, scores_full, threshold=threshold)
             
     return canvas
 
@@ -220,4 +238,3 @@ def batch_draw_pose(pose_list, threshold=0.4):
     batch_tensor = torch.from_numpy(np.stack(frames, axis=0))
     
     return batch_tensor
-
