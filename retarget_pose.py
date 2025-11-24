@@ -83,12 +83,54 @@ def parse_pose_data(data):
     # The prompt says "receive ... not include face ... if receive face ignore")
     # We just don't process face keys.
 
+    canvas_width = frame_data.get("canvas_width", 0)
+    canvas_height = frame_data.get("canvas_height", 0)
+
+    # Check for normalized coordinates and denormalize if necessary
+    all_kpts = []
+    if body is not None: all_kpts.append(body)
+    if left_hand is not None: all_kpts.append(left_hand)
+    if right_hand is not None: all_kpts.append(right_hand)
+    
+    is_normalized = False
+    if all_kpts:
+        # Flatten to check values
+        flat_list = [k[:, :2].flatten() for k in all_kpts] # Only check x,y
+        flat = np.concatenate(flat_list)
+        if len(flat) > 0:
+            max_val = np.max(flat)
+            # If max value is <= 1.0 and there is at least some data > 0
+            if max_val <= 1.0 and max_val > 0:
+                 is_normalized = True
+
+    if is_normalized:
+        # Determine scale
+        # If canvas dimensions are missing or small, default to 512 (common square format)
+        # or 1024 if you prefer high res, but 512 is safer for SD.
+        scale_w = canvas_width if canvas_width > 1 else 512
+        scale_h = canvas_height if canvas_height > 1 else 512
+        
+        # Update width/height if they were missing/invalid
+        if canvas_width <= 1: canvas_width = int(scale_w)
+        if canvas_height <= 1: canvas_height = int(scale_h)
+        
+        # Denormalize
+        if body is not None:
+            body[:, 0] *= scale_w
+            body[:, 1] *= scale_h
+        if left_hand is not None:
+            left_hand[:, 0] *= scale_w
+            left_hand[:, 1] *= scale_h
+        if right_hand is not None:
+            right_hand[:, 0] *= scale_w
+            right_hand[:, 1] *= scale_h
+
     return {
         "body": body,
         "left_hand": left_hand,
         "right_hand": right_hand,
-        "canvas_width": frame_data.get("canvas_width", 0), # Some formats might differ
-        "canvas_height": frame_data.get("canvas_height", 0)
+        "canvas_width": canvas_width,
+        "canvas_height": canvas_height
     }
 
 def get_bone_length(kpts, i1, i2):

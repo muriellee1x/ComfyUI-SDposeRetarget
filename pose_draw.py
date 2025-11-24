@@ -60,6 +60,14 @@ def draw_body(canvas, keypoints, threshold=0.4):
     """
     H, W, C = canvas.shape
     
+    # Check if keypoints are normalized (0-1) and denormalize if so
+    if keypoints.size > 0:
+        max_val = np.max(keypoints[:, :2])
+        if max_val <= 1.0 and max_val > 0:
+            keypoints = keypoints.copy()
+            keypoints[:, 0] *= W
+            keypoints[:, 1] *= H
+
     # Draw Lines
     for i, (p1_idx, p2_idx) in enumerate(BODY_PAIRS):
         if p1_idx >= len(keypoints) or p2_idx >= len(keypoints):
@@ -112,6 +120,16 @@ def draw_hand(canvas, keypoints, threshold=0.4):
     if keypoints is None or len(keypoints) < 21:
         return
 
+    H, W, C = canvas.shape
+    
+    # Check if keypoints are normalized (0-1) and denormalize if so
+    if keypoints.size > 0:
+        max_val = np.max(keypoints[:, :2])
+        if max_val <= 1.0 and max_val > 0:
+            keypoints = keypoints.copy()
+            keypoints[:, 0] *= W
+            keypoints[:, 1] *= H
+
     # Draw Lines
     for p1_idx, p2_idx in HAND_PAIRS:
         p1 = keypoints[p1_idx]
@@ -139,6 +157,9 @@ def draw_pose_frame(pose_data, width, height, threshold=0.4):
     # Ensure dimensions are valid
     if width <= 0: width = 512
     if height <= 0: height = 512
+    
+    width = int(width)
+    height = int(height)
     
     canvas = np.zeros((height, width, 3), dtype=np.uint8)
     
