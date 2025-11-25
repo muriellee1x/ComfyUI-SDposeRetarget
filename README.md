@@ -41,6 +41,3 @@ A skeleton animation retargeting node based on SDpose-OOD model, supporting full
 支持标准 OpenPose JSON 格式，包含 `pose_keypoints_2d`、`hand_left/right_keypoints_2d`、`foot_keypoints_2d`。
 
 Supports standard OpenPose JSON format with body, hand, and foot keypoints.
-
-```
-
