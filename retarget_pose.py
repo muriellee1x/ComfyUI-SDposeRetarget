@@ -429,9 +429,10 @@ def get_scaled_pose(canvas, src_canvas, keypoints, keypoints_hand, bone_ratio_li
                     rel_y = foot_orig_px[1] - ankle_orig[1]
                     
                     # 应用脚部骨骼缩放比例到相对偏移，计算新位置
+                    # 注意：ankle_new 已经被 /= scale_min 缩放过，所以偏移量也需要除以 scale_min
                     new_foot_px = [
-                        ankle_new[0] + rel_x * foot_ratio,
-                        ankle_new[1] + rel_y * foot_ratio
+                        ankle_new[0] + rel_x * foot_ratio / scale_min,
+                        ankle_new[1] + rel_y * foot_ratio / scale_min
                     ]
                     
                     # 归一化到 0-1
