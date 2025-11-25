@@ -29,7 +29,7 @@ A skeleton animation retargeting node based on SDpose-OOD model, supporting full
 | 参数 Parameter | 说明 Description |
 |----------------|------------------|
 | `bone_thickness` | 骨骼线条粗细 / Bone line thickness |
-| `align_to_bottom` | 底部对齐（稳定脚底位置）/ Align to bottom (stabilize feet) |
+| `align_to_bottom` | 底部对齐/ Align to bottom |
 
 ### 3. Load Video Frame
 **帧提取节点** - 从图像序列中提取指定帧。
@@ -42,11 +42,5 @@ A skeleton animation retargeting node based on SDpose-OOD model, supporting full
 
 Supports standard OpenPose JSON format with body, hand, and foot keypoints.
 
----
-
-## 工作流程 / Workflow
-
 ```
-参考视频 → DWPose检测 → SDpose Retarget → SDPose Draw → ControlNet
-Reference Video → DWPose → SDpose Retarget → SDPose Draw → ControlNet
-```
+
