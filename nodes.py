@@ -237,15 +237,50 @@ class LoadVideoFrame:
         
         return (selected_frame, total_frames, info)
 
+class ImageToContiguous:
+    """
+    将图像转换为内存连续的格式
+    解决某些节点（如SDPose）在处理生成图片时因内存不连续导致的OpenCV报错
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "images": ("IMAGE", {"tooltip": "输入图像"}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    FUNCTION = "to_contiguous"
+    CATEGORY = "SDposeRetarget"
+    DESCRIPTION = "将图像转换为内存连续格式。用于解决生成图片连接到某些节点（如SDPose estimation）时的OpenCV报错问题。"
+
+    def to_contiguous(self, images):
+        # 方法1：使用 torch.contiguous()
+        if not images.is_contiguous():
+            images = images.contiguous()
+        
+        # 方法2：额外保险 - 转numpy再转回来确保C-contiguous
+        # 这可以解决一些更深层的内存布局问题
+        images_np = images.cpu().numpy()
+        images_np = np.ascontiguousarray(images_np)
+        images = torch.from_numpy(images_np).to(images.device)
+        
+        return (images,)
+
+
 # 节点映射
 NODE_CLASS_MAPPINGS = {
     "SDposeRetarget": SDposeRetarget,
     "SDPoseDraw": SDPoseDraw,
     "LoadVideoFrame": LoadVideoFrame,
+    "ImageToContiguous": ImageToContiguous,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "SDposeRetarget": "SDpose Retarget",
     "SDPoseDraw": "SDPose Draw OpenPose",
     "LoadVideoFrame": "Load Video Frame",
+    "ImageToContiguous": "Image To Contiguous (Fix OpenCV)",
 }

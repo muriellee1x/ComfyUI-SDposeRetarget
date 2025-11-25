@@ -34,6 +34,25 @@ A skeleton animation retargeting node based on SDpose-OOD model, supporting full
 ### 3. Load Video Frame
 **帧提取节点** - 从图像序列中提取指定帧。
 
+### 4. Image To Contiguous (Fix OpenCV)
+**图像内存修复节点** - 将图像转换为内存连续格式。
+
+| 用途 Usage |
+|------------|
+| 解决生成图片连接到 SDPose estimation 等节点时的 OpenCV 报错 |
+| Fix OpenCV errors when connecting generated images to SDPose estimation |
+
+**常见错误 / Common Error:**
+```
+OpenCV error: (-5:Bad argument) in function 'fillConvexPoly'
+Layout of the output array img is incompatible with cv::Mat
+```
+
+**使用方法 / Usage:**
+```
+[生成图片节点] → [Image To Contiguous] → [SDPose Estimation]
+```
+
 ---
 
 ## 输入格式 / Input Format
@@ -41,3 +60,4 @@ A skeleton animation retargeting node based on SDpose-OOD model, supporting full
 支持标准 OpenPose JSON 格式，包含 `pose_keypoints_2d`、`hand_left/right_keypoints_2d`、`foot_keypoints_2d`。
 
 Supports standard OpenPose JSON format with body, hand, and foot keypoints.
+
