@@ -80,13 +80,8 @@ def get_handpose_meta(keypoints, delta, src_H, src_W):
 
     new_keypoints = []
     
-    # 首先计算手腕位置（第0个点），用于后续的异常检测
-    wrist_pixel = None
-    if len(keypoints) > 0 and keypoints[0] is not None and keypoints[0].score > 0:
-        if not (abs(keypoints[0].x) < 1e-6 and abs(keypoints[0].y) < 1e-6):
-            wrist_x = keypoints[0].x * src_W + delta[0]
-            wrist_y = keypoints[0].y * src_H + delta[1]
-            wrist_pixel = (wrist_x, wrist_y)
+    # 坐标有效性阈值，与 deal_hand_keypoints 保持一致
+    coord_threshold = 0.01
 
     for idx, keypoint in enumerate(keypoints):
         if keypoint is None:
@@ -98,24 +93,14 @@ def get_handpose_meta(keypoints, delta, src_H, src_W):
         
         # 检查坐标是否有效（不是全0或无效值）
         # keypoint.x 和 keypoint.y 是归一化坐标（0-1范围）
-        # 只过滤掉明确为 0 的点（使用很小的阈值避免浮点数精度问题）
-        if abs(keypoint.x) < 1e-6 and abs(keypoint.y) < 1e-6:
+        # 使用 0.01 作为阈值，过滤掉那些坐标明显无效的点
+        if abs(keypoint.x) < coord_threshold and abs(keypoint.y) < coord_threshold:
             new_keypoints.append(None)
             continue
 
         x, y = keypoint.x, keypoint.y
         x = int(x * src_W + delta[0])
         y = int(y * src_H + delta[1])
-        
-        # 安全检查：如果手指关键点距离手腕太远，认为是异常数据
-        # 手部关键点到手腕的距离不应超过画布尺寸的一定比例
-        if wrist_pixel is not None and idx > 0:
-            dist_to_wrist = math.sqrt((x - wrist_pixel[0])**2 + (y - wrist_pixel[1])**2)
-            max_dist = max(src_W, src_H) * 0.25  # 手指长度不应超过画布的25%
-            if dist_to_wrist > max_dist:
-                # 异常点，跳过
-                new_keypoints.append(None)
-                continue
 
         new_keypoints.append(                
                 Keypoint(
@@ -139,33 +124,49 @@ def deal_hand_keypoints(hand_res, r_ratio, l_ratio, hand_score_th = 0.5):
     left_wrist_valid = hand_res['left'][0][2] > 0  # score=-1 或 0 都认为无效
     right_wrist_valid = hand_res['right'][0][2] > 0  # score=-1 或 0 都认为无效
     
-    # 获取手腕位置用于异常检测（归一化坐标）
-    left_wrist = (hand_res['left'][0][0], hand_res['left'][0][1]) if left_wrist_valid else None
-    right_wrist = (hand_res['right'][0][0], hand_res['right'][0][1]) if right_wrist_valid else None
+    # 获取手腕坐标
+    left_wrist_x = hand_res['left'][0][0]
+    left_wrist_y = hand_res['left'][0][1]
+    right_wrist_x = hand_res['right'][0][0]
+    right_wrist_y = hand_res['right'][0][1]
     
-    # 手指到手腕的最大允许距离（归一化坐标，约占画面15%）
-    max_finger_dist = 0.15
+    left_delta_x = left_wrist_x * (l_ratio - 1) 
+    left_delta_y = left_wrist_y * (l_ratio - 1)
 
-    left_delta_x = hand_res['left'][0][0] * (l_ratio - 1) 
-    left_delta_y = hand_res['left'][0][1] * (l_ratio - 1)
-
-    right_delta_x = hand_res['right'][0][0] * (r_ratio - 1)
-    right_delta_y = hand_res['right'][0][1] * (r_ratio - 1)
+    right_delta_x = right_wrist_x * (r_ratio - 1)
+    right_delta_y = right_wrist_y * (r_ratio - 1)
 
     length = len(hand_res['left'])
+    
+    # 坐标有效性阈值：如果归一化坐标太接近0，认为是未检测到的点
+    # 使用 0.01 作为阈值（对于 512x512 的图，约 5 像素）
+    coord_threshold = 0.01
+    
+    # 手部关键点距离阈值：非手腕点与手腕的距离不应超过此值（归一化坐标）
+    # 正常手掌宽度约为图像宽度的 5-10%，设置 15% 作为最大阈值
+    # 如果某个点离手腕太远，说明检测可能有误
+    max_hand_distance = 0.15
 
     for i in range(length):
         # left hand
-        # score 必须 > 0 且 >= threshold (score=-1 或 0 都表示无效)
-        left_point_valid = left_wrist_valid and hand_res['left'][i][2] > 0 and hand_res['left'][i][2] >= hand_score_th
+        # 检查条件：
+        # 1. 手腕必须有效
+        # 2. score 必须 > 0 且 >= threshold
+        # 3. 坐标必须有效（不能同时接近0，表示未检测到）
+        # 4. 非手腕点必须在手腕附近（距离检查）
+        left_x = hand_res['left'][i][0]
+        left_y = hand_res['left'][i][1]
+        left_score = hand_res['left'][i][2]
+        left_coord_valid = not (abs(left_x) < coord_threshold and abs(left_y) < coord_threshold)
         
-        # 检查手指点到手腕距离是否合理（仅对非手腕点检查）
-        if left_point_valid and i > 0 and left_wrist is not None:
-            dx = hand_res['left'][i][0] - left_wrist[0]
-            dy = hand_res['left'][i][1] - left_wrist[1]
-            dist = math.sqrt(dx*dx + dy*dy)
-            if dist > max_finger_dist:
-                left_point_valid = False  # 异常点，标记为无效
+        # 对于非手腕点，检查与手腕的距离
+        if i > 0 and left_wrist_valid:
+            left_dist_to_wrist = ((left_x - left_wrist_x)**2 + (left_y - left_wrist_y)**2)**0.5
+            left_distance_valid = left_dist_to_wrist <= max_hand_distance
+        else:
+            left_distance_valid = True  # 手腕点不检查距离
+        
+        left_point_valid = left_wrist_valid and left_score > 0 and left_score >= hand_score_th and left_coord_valid and left_distance_valid
         
         if not left_point_valid:
             left_hand.append(
@@ -178,23 +179,27 @@ def deal_hand_keypoints(hand_res, r_ratio, l_ratio, hand_score_th = 0.5):
         else:
             left_hand.append(
                 Keypoint(
-                    x=hand_res['left'][i][0] * l_ratio - left_delta_x,
-                    y=hand_res['left'][i][1] * l_ratio - left_delta_y,
-                    score = hand_res['left'][i][2]
+                    x=left_x * l_ratio - left_delta_x,
+                    y=left_y * l_ratio - left_delta_y,
+                    score=left_score
                 )
             )
 
         # right hand
-        # score 必须 > 0 且 >= threshold (score=-1 或 0 都表示无效)
-        right_point_valid = right_wrist_valid and hand_res['right'][i][2] > 0 and hand_res['right'][i][2] >= hand_score_th
+        # 检查条件同上
+        right_x = hand_res['right'][i][0]
+        right_y = hand_res['right'][i][1]
+        right_score = hand_res['right'][i][2]
+        right_coord_valid = not (abs(right_x) < coord_threshold and abs(right_y) < coord_threshold)
         
-        # 检查手指点到手腕距离是否合理（仅对非手腕点检查）
-        if right_point_valid and i > 0 and right_wrist is not None:
-            dx = hand_res['right'][i][0] - right_wrist[0]
-            dy = hand_res['right'][i][1] - right_wrist[1]
-            dist = math.sqrt(dx*dx + dy*dy)
-            if dist > max_finger_dist:
-                right_point_valid = False  # 异常点，标记为无效
+        # 对于非手腕点，检查与手腕的距离
+        if i > 0 and right_wrist_valid:
+            right_dist_to_wrist = ((right_x - right_wrist_x)**2 + (right_y - right_wrist_y)**2)**0.5
+            right_distance_valid = right_dist_to_wrist <= max_hand_distance
+        else:
+            right_distance_valid = True  # 手腕点不检查距离
+        
+        right_point_valid = right_wrist_valid and right_score > 0 and right_score >= hand_score_th and right_coord_valid and right_distance_valid
         
         if not right_point_valid:
             right_hand.append(
@@ -207,9 +212,9 @@ def deal_hand_keypoints(hand_res, r_ratio, l_ratio, hand_score_th = 0.5):
         else:
             right_hand.append(
                 Keypoint(
-                    x=hand_res['right'][i][0] * r_ratio - right_delta_x,
-                    y=hand_res['right'][i][1] * r_ratio - right_delta_y,
-                    score = hand_res['right'][i][2]
+                    x=right_x * r_ratio - right_delta_x,
+                    y=right_y * r_ratio - right_delta_y,
+                    score=right_score
                 )
             )
 
@@ -217,7 +222,8 @@ def deal_hand_keypoints(hand_res, r_ratio, l_ratio, hand_score_th = 0.5):
 
 
 def get_scaled_pose(canvas, src_canvas, keypoints, keypoints_hand, bone_ratio_list, delta_ground_x, delta_ground_y,
-                                       rescaled_src_ground_x, body_flag, id, scale_min, threshold = 0.4, hand_ratio=None, keypoints_foot=None):
+                                       rescaled_src_ground_x, body_flag, id, scale_min, threshold = 0.4, hand_ratio=None, keypoints_foot=None, 
+                                       first_frame_offset_x=None, first_frame_offset_y=None):
 
     H, W = canvas
     src_H, src_W = src_canvas
@@ -232,12 +238,28 @@ def get_scaled_pose(canvas, src_canvas, keypoints, keypoints_hand, bone_ratio_li
 
         keypoints[idx] = [keypoints[idx][0] * src_W, keypoints[idx][1] * src_H, keypoints[idx][2]]
 
+    # 在修改 keypoints 之前，保存 ankle 的原始像素坐标（用于脚部关键点计算）
+    # 这是必要的，因为后续的浅拷贝和原地修改可能会意外改变 keypoints 中的值
+    # 注意：必须检查 score > 0，否则 [0,0,0] 的 ankle 会导致脚部关键点计算错误
+    r_ankle_orig_saved = [keypoints[10][0], keypoints[10][1], keypoints[10][2]] if (len(keypoints) > 10 and keypoints[10] is not None and len(keypoints[10]) >= 3 and keypoints[10][2] > 0) else None
+    l_ankle_orig_saved = [keypoints[13][0], keypoints[13][1], keypoints[13][2]] if (len(keypoints) > 13 and keypoints[13] is not None and len(keypoints[13]) >= 3 and keypoints[13][2] > 0) else None
+
+    # 检查关键点是否有效：不为 None、不为空、且 score > 0
+    # 如果 score = 0，表示该关键点未被检测到，应视为无效
+    def is_valid_keypoint(kp):
+        if kp is None or len(kp) == 0:
+            return False
+        # 如果有 score 字段（第3个元素），检查是否 > 0
+        if len(kp) >= 3 and kp[2] <= 0:
+            return False
+        return True
+
     # first traverse, get new_length_list and angle_list
     for idx, (k1_index, k2_index) in enumerate(limbSeq):
         keypoint1 = keypoints[k1_index - 1]
         keypoint2 = keypoints[k2_index - 1]
 
-        if keypoint1 is None or keypoint2 is None or len(keypoint1) == 0 or len(keypoint2) == 0:
+        if not is_valid_keypoint(keypoint1) or not is_valid_keypoint(keypoint2):
             new_length_list.append(None)
             angle_list.append(None)
             continue
@@ -264,7 +286,30 @@ def get_scaled_pose(canvas, src_canvas, keypoints, keypoints_hand, bone_ratio_li
             new_length_list[17] = new_length_list[11] * foot_lower_leg_ratio
 
     # second traverse, calculate new keypoints
-    rescale_keypoints = keypoints.copy()
+    # 初始化时清除所有无效的关键点（score <= 0），避免孤立的关键点被错误保留
+    rescale_keypoints = []
+    for kp in keypoints:
+        if is_valid_keypoint(kp):
+            rescale_keypoints.append(list(kp) if kp is not None else None)
+        else:
+            rescale_keypoints.append(None)
+    
+    # 清除没有完整上游骨骼链的关键点
+    # 腿部骨骼链: Neck(1) -> Hip -> Knee -> Ankle
+    # 如果上游关键点无效，下游关键点也应该被清除，即使它们有 score > 0
+    # 右腿: RHip(8) <- Neck(1), RKnee(9) <- RHip(8), RAnkle(10) <- RKnee(9)
+    if not is_valid_keypoint(rescale_keypoints[1]):  # Neck 无效
+        rescale_keypoints[8] = None  # RHip
+        rescale_keypoints[11] = None  # LHip
+    if not is_valid_keypoint(rescale_keypoints[8]):  # RHip 无效
+        rescale_keypoints[9] = None  # RKnee
+    if not is_valid_keypoint(rescale_keypoints[9]):  # RKnee 无效
+        rescale_keypoints[10] = None  # RAnkle
+    # 左腿: LHip(11) <- Neck(1), LKnee(12) <- LHip(11), LAnkle(13) <- LKnee(12)
+    if not is_valid_keypoint(rescale_keypoints[11]):  # LHip 无效
+        rescale_keypoints[12] = None  # LKnee
+    if not is_valid_keypoint(rescale_keypoints[12]):  # LKnee 无效
+        rescale_keypoints[13] = None  # LAnkle
 
     for idx, (k1_index, k2_index) in enumerate(limbSeq):
         # update dst_keypoints
@@ -272,8 +317,9 @@ def get_scaled_pose(canvas, src_canvas, keypoints, keypoints_hand, bone_ratio_li
         new_length = new_length_list[idx]
         angle = angle_list[idx]
 
-        if rescale_keypoints[k1_index - 1] is None or rescale_keypoints[k2_index - 1] is None or \
-            len(rescale_keypoints[k1_index - 1]) == 0 or len(rescale_keypoints[k2_index - 1]) == 0:
+        # 检查起点是否有效（包括 score > 0），同时检查 new_length 和 angle 是否有效
+        # 如果第一次遍历时骨骼被跳过（因为端点无效），new_length 和 angle 会是 None
+        if not is_valid_keypoint(start_keypoint) or new_length is None or angle is None:
             continue
 
         # calculate end_keypoint
@@ -283,16 +329,34 @@ def get_scaled_pose(canvas, src_canvas, keypoints, keypoints_hand, bone_ratio_li
         end_keypoint_x = start_keypoint[0] - delta_x
         end_keypoint_y = start_keypoint[1] - delta_y
 
-        # update keypoints
-        rescale_keypoints[k2_index - 1] = [end_keypoint_x, end_keypoint_y, rescale_keypoints[k2_index - 1][2]]
+        # 获取原始终点的 score（如果存在），否则使用起点的 score
+        if rescale_keypoints[k2_index - 1] is not None and len(rescale_keypoints[k2_index - 1]) >= 3:
+            end_score = rescale_keypoints[k2_index - 1][2]
+        else:
+            end_score = start_keypoint[2] if len(start_keypoint) >= 3 else 1.0
 
-    if id == 0:
+        # update keypoints
+        rescale_keypoints[k2_index - 1] = [end_keypoint_x, end_keypoint_y, end_score]
+
+    # 计算或应用第一帧的位置偏移量
+    # 关键修复：第一帧计算偏移量，后续帧复用相同的偏移量，确保视频运动连续性
+    computed_offset_x = None
+    computed_offset_y = None
+    
+    if first_frame_offset_x is not None and first_frame_offset_y is not None:
+        # 后续帧：使用第一帧计算的偏移量
+        delta_ground_x += first_frame_offset_x
+        delta_ground_y += first_frame_offset_y
+    elif id == 0:
+        # 第一帧：计算偏移量并保存
         if body_flag == 'full_body' and rescale_keypoints[8] != None and rescale_keypoints[11] != None:
-            delta_ground_x_offset_first_frame = (rescale_keypoints[8][0] + rescale_keypoints[11][0]) / 2 - rescaled_src_ground_x
-            delta_ground_x += delta_ground_x_offset_first_frame
+            computed_offset_x = (rescale_keypoints[8][0] + rescale_keypoints[11][0]) / 2 - rescaled_src_ground_x
+            delta_ground_x += computed_offset_x
         elif body_flag == 'half_body' and rescale_keypoints[1] != None:
-            delta_ground_x_offset_first_frame = rescale_keypoints[1][0] - rescaled_src_ground_x
-            delta_ground_x += delta_ground_x_offset_first_frame
+            computed_offset_x = rescale_keypoints[1][0] - rescaled_src_ground_x
+            delta_ground_x += computed_offset_x
+        # Y 方向偏移暂时为 0（如果需要可以扩展）
+        computed_offset_y = 0
 
     # offset all keypoints
     for idx in range(len(rescale_keypoints)):
@@ -334,33 +398,35 @@ def get_scaled_pose(canvas, src_canvas, keypoints, keypoints_hand, bone_ratio_li
 
     elif rescale_keypoints[4] == None and rescale_keypoints[7] != None:
         # 只有 LWrist (7) 存在
-        # 注意：在 retarget 过程中，源视频的手部数据可能需要映射到目标骨骼的对应手腕
-        # 经过测试，需要交叉匹配：left_hand 对应 RWrist(4)，right_hand 对应 LWrist(7)
+        # 交叉匹配：right_hand → LWrist (7) = 人的左手腕位置 → 输出为 hand_left
         right_hand_delta = np.array([
             rescale_keypoints[7][0] - right_hand[0].x * src_W,
             rescale_keypoints[7][1] - right_hand[0].y * src_H
         ]) if right_hand[0].x != -1 else np.array([0, 0])
-        right_hand_new = get_handpose_meta(right_hand, right_hand_delta, src_H, src_W)
-        # 左手无法计算（RWrist 不存在），必须清空为全 None，避免错误保留原始数据
-        left_hand_new = [None] * len(left_hand)
+        # 移动后的 right_hand 位于 LWrist，应成为 left_hand_new（人的左手）
+        left_hand_new = get_handpose_meta(right_hand, right_hand_delta, src_H, src_W)
+        # 右手无法计算（RWrist 不存在），清空
+        right_hand_new = [None] * len(right_hand)
 
     elif rescale_keypoints[4] != None and rescale_keypoints[7] == None:
         # 只有 RWrist (4) 存在
+        # 交叉匹配：left_hand → RWrist (4) = 人的右手腕位置 → 输出为 hand_right
         left_hand_delta = np.array([
             rescale_keypoints[4][0] - left_hand[0].x * src_W,
             rescale_keypoints[4][1] - left_hand[0].y * src_H
         ]) if left_hand[0].x != -1 else np.array([0, 0])
-        left_hand_new = get_handpose_meta(left_hand, left_hand_delta, src_H, src_W)
-        # 右手无法计算（LWrist 不存在），必须清空为全 None，避免错误保留原始数据
-        right_hand_new = [None] * len(right_hand)
+        # 移动后的 left_hand 位于 RWrist，应成为 right_hand_new（人的右手）
+        right_hand_new = get_handpose_meta(left_hand, left_hand_delta, src_H, src_W)
+        # 左手无法计算（LWrist 不存在），清空
+        left_hand_new = [None] * len(left_hand)
 
     else:
-        # 交叉匹配：经过测试发现需要交换左右手的目标手腕
-        # left_hand (源数据的 hand_left) → 移动到 RWrist (index 4) 位置
-        # right_hand (源数据的 hand_right) → 移动到 LWrist (index 7) 位置
+        # 交叉匹配：两个手腕都存在，需要交换左右手的目标手腕和输出标签
+        # left_hand (源 hand_left) → RWrist (4) = 人的右手腕 → 输出为 hand_right
+        # right_hand (源 hand_right) → LWrist (7) = 人的左手腕 → 输出为 hand_left
         # 
-        # 原因：retarget 过程中骨骼的左右可能发生了翻转，
-        # 导致源视频的左手需要映射到目标骨骼的右手腕位置
+        # 原因：retarget 过程中骨骼的左右发生了翻转，
+        # 源视频的左手需要映射到目标骨骼的右手腕位置，并且输出标签也要相应交换
         
         # left_hand 移动到 RWrist (index 4)
         left_hand_delta = np.array([
@@ -374,8 +440,11 @@ def get_scaled_pose(canvas, src_canvas, keypoints, keypoints_hand, bone_ratio_li
             rescale_keypoints[7][1] - right_hand[0].y * src_H
         ]) if right_hand[0].x != -1 else np.array([0, 0])
 
-        left_hand_new = get_handpose_meta(left_hand, left_hand_delta, src_H, src_W)
-        right_hand_new = get_handpose_meta(right_hand, right_hand_delta, src_H, src_W)
+        # 关键修复：交换输出标签
+        # left_hand 移动到 RWrist 后成为 right_hand_new（人的右手）
+        # right_hand 移动到 LWrist 后成为 left_hand_new（人的左手）
+        right_hand_new = get_handpose_meta(left_hand, left_hand_delta, src_H, src_W)
+        left_hand_new = get_handpose_meta(right_hand, right_hand_delta, src_H, src_W)
 
     # get normalized keypoints_body
     # 注意：rescale_keypoints 是基于源画布尺度的像素坐标，需要使用 src_W, src_H 归一化
@@ -392,9 +461,10 @@ def get_scaled_pose(canvas, src_canvas, keypoints, keypoints_hand, bone_ratio_li
     # 固定匹配：索引 0-2 对应 RAnkle，索引 3-5 对应 LAnkle
     norm_foot_keypoints = []
     if keypoints_foot is not None and len(keypoints_foot) >= 6:
-        # 获取原始 ankle 位置（像素坐标，keypoints 已转换）
-        r_ankle_orig = keypoints[10] if keypoints[10] is not None else None
-        l_ankle_orig = keypoints[13] if keypoints[13] is not None else None
+        # 使用保存的原始 ankle 位置（在任何修改之前保存的像素坐标）
+        # 这避免了由于浅拷贝导致的 keypoints 被意外修改的问题
+        r_ankle_orig = r_ankle_orig_saved
+        l_ankle_orig = l_ankle_orig_saved
         
         # 获取 rescaled ankle 位置
         r_ankle_new = rescale_keypoints[10] if rescale_keypoints[10] is not None else None
@@ -406,21 +476,26 @@ def get_scaled_pose(canvas, src_canvas, keypoints, keypoints_hand, bone_ratio_li
         
         for i in range(6):
             foot_kp = keypoints_foot[i]
-            if foot_kp is not None and len(foot_kp) >= 3 and foot_kp[2] > 0:
+            # 检查脚部关键点有效性：score > 0 且坐标不能同时接近0
+            # 使用 0.01 作为阈值，与手部检查保持一致
+            foot_coord_valid = foot_kp is not None and len(foot_kp) >= 3 and not (abs(foot_kp[0]) < 0.01 and abs(foot_kp[1]) < 0.01)
+            if foot_coord_valid and foot_kp[2] > 0:
                 # 原始脚部像素坐标
                 foot_orig_px = [foot_kp[0] * src_W, foot_kp[1] * src_H]
                 
-                # 固定匹配：索引 0-2 (R foot) 对应 RAnkle，索引 3-5 (L foot) 对应 LAnkle
+                # 交叉匹配：与手部类似，retarget 过程中骨骼的左右发生了翻转
+                # 索引 0-2 (R foot in input) → 移动到 LAnkle (index 13) 位置
+                # 索引 3-5 (L foot in input) → 移动到 RAnkle (index 10) 位置
                 if i < 3:
-                    # 右脚关键点 (RBigToe, RSmallToe, RHeel) 对应 RAnkle
-                    ankle_orig = r_ankle_orig
-                    ankle_new = r_ankle_new
-                    foot_ratio = r_foot_ratio
-                else:
-                    # 左脚关键点 (LBigToe, LSmallToe, LHeel) 对应 LAnkle
+                    # 右脚关键点 (RBigToe, RSmallToe, RHeel) → 对应 LAnkle
                     ankle_orig = l_ankle_orig
                     ankle_new = l_ankle_new
                     foot_ratio = l_foot_ratio
+                else:
+                    # 左脚关键点 (LBigToe, LSmallToe, LHeel) → 对应 RAnkle
+                    ankle_orig = r_ankle_orig
+                    ankle_new = r_ankle_new
+                    foot_ratio = r_foot_ratio
                 
                 if ankle_orig is not None and ankle_new is not None:
                     # 计算脚部关键点相对于 ankle 的偏移
@@ -445,8 +520,9 @@ def get_scaled_pose(canvas, src_canvas, keypoints, keypoints_hand, bone_ratio_li
         norm_foot_keypoints = [[0, 0, 0]] * 6
 
     # OpenPose 约定：hand_left = 人的左手（图像右侧），hand_right = 人的右手（图像左侧）
-    # left_hand_new 使用 LWrist (7) 偏移计算 → 在图像右侧 → 对应 hand_left
-    # right_hand_new 使用 RWrist (4) 偏移计算 → 在图像左侧 → 对应 hand_right
+    # 经过交叉匹配处理后：
+    # left_hand_new 已正确对应 LWrist (7) 位置 → 图像右侧 → hand_left
+    # right_hand_new 已正确对应 RWrist (4) 位置 → 图像左侧 → hand_right
     frame_info = {
                     'height': src_H,
                     'width': src_W,
@@ -456,7 +532,7 @@ def get_scaled_pose(canvas, src_canvas, keypoints, keypoints_hand, bone_ratio_li
                     'keypoints_foot': norm_foot_keypoints,  # 新增：完整的6个脚部关键点
                 }
 
-    return frame_info
+    return frame_info, computed_offset_x, computed_offset_y
 
 
 def rescale_skeleton(H, W, keypoints, bone_ratio_list):
@@ -502,8 +578,11 @@ def rescale_skeleton(H, W, keypoints, bone_ratio_list):
         new_length = new_length_list[idx]
         angle = angle_list[idx]
 
-        if rescale_keypoints[k1_index - 1] is None or rescale_keypoints[k2_index - 1] is None or \
-            len(rescale_keypoints[k1_index - 1]) == 0 or len(rescale_keypoints[k2_index - 1]) == 0:
+        # 只检查起点是否有效，不检查终点（终点会被计算出来）
+        # 同时检查 new_length 和 angle 是否有效
+        if rescale_keypoints[k1_index - 1] is None or \
+            len(rescale_keypoints[k1_index - 1]) == 0 or \
+            new_length is None or angle is None:
             continue
 
         # calculate end_keypoint
@@ -683,13 +762,22 @@ def check_full_body_both(flag1, flag2):
 def write_to_poses(data_to_json, none_idx, dst_shape, bone_ratio_list, delta_ground_x, delta_ground_y, rescaled_src_ground_x, body_flag, scale_min, hand_ratio=None):
     outputs = []
     length = len(data_to_json)
+    
+    # 保存第一帧计算的偏移量，确保所有帧使用相同的位置变换
+    first_frame_offset_x = None
+    first_frame_offset_y = None
+    
     for id in tqdm(range(length)):
 
         src_height, src_width = data_to_json[id]['height'], data_to_json[id]['width']
         width, height = dst_shape
         keypoints = data_to_json[id]['keypoints_body']
+        # 只对非手腕关键点应用 none_idx 过滤
+        # 手腕索引: 4 (RWrist) 和 7 (LWrist)
+        # 保留手腕关键点，以便后续帧可以正确计算手部骨骼
+        wrist_indices = {4, 7}
         for idx in range(len(keypoints)):
-            if idx in none_idx:
+            if idx in none_idx and idx not in wrist_indices:
                 keypoints[idx] = None
         new_keypoints = keypoints.copy()
 
@@ -727,7 +815,20 @@ def write_to_poses(data_to_json, none_idx, dst_shape, bone_ratio_list, delta_gro
         # 获取脚部关键点数据
         keypoints_foot = data_to_json[id].get('keypoints_foot', None)
         
-        frame_info = get_scaled_pose((height, width), (src_height, src_width), new_keypoints, keypoints_hand, bone_ratio_list, delta_ground_x, delta_ground_y, rescaled_src_ground_x, body_flag, id, scale_min, hand_ratio=current_hand_ratio, keypoints_foot=keypoints_foot)
+        # 关键修复：第一帧计算偏移量，后续帧复用第一帧的偏移量
+        # 这确保所有帧使用相同的位置变换，保持视频运动的连续性
+        frame_info, computed_offset_x, computed_offset_y = get_scaled_pose(
+            (height, width), (src_height, src_width), new_keypoints, keypoints_hand, 
+            bone_ratio_list, delta_ground_x, delta_ground_y, rescaled_src_ground_x, 
+            body_flag, id, scale_min, hand_ratio=current_hand_ratio, keypoints_foot=keypoints_foot,
+            first_frame_offset_x=first_frame_offset_x, first_frame_offset_y=first_frame_offset_y
+        )
+        
+        # 保存第一帧的偏移量供后续帧使用
+        if id == 0 and computed_offset_x is not None:
+            first_frame_offset_x = computed_offset_x
+            first_frame_offset_y = computed_offset_y if computed_offset_y is not None else 0
+        
         outputs.append(frame_info)
 
     return outputs
@@ -1472,6 +1573,231 @@ def scale_and_center_pose(openpose_data, target_width, target_height):
     return openpose_data
 
 
+def scale_to_match_target_pose_with_params(openpose_data, target_pose, target_width, target_height,
+                                           preset_scale=None, preset_src_center=None, preset_target_center=None,
+                                           src_aspect_ratio=None):
+    """
+    将 OpenPose 数据缩放并定位到与 target_pose 相同的大小和位置
+    
+    关键改进：
+    1. 第一帧计算缩放比例和位置偏移，后续帧复用相同参数
+    2. 同时调整骨骼大小和位置，确保与 target_pose 匹配
+    3. 正确处理源数据的宽高比，避免因归一化/反归一化导致的畸变
+    
+    参数:
+        openpose_data: 需要变换的 OpenPose JSON 数据
+        target_pose: 目标姿态的 OpenPose JSON 数据（作为位置和大小参考）
+        target_width: 目标画布宽度
+        target_height: 目标画布高度
+        preset_scale: 预设的缩放比例 (scale_x, scale_y) 或 float
+        preset_src_center: 预设的源骨骼中心 (src_center_x, src_center_y)
+        preset_target_center: 预设的目标骨骼中心 (target_center_x, target_center_y)
+        src_aspect_ratio: 源数据的原始宽高比 (width/height)，用于修正畸变
+    
+    返回:
+        (变换后的 OpenPose JSON 数据, 缩放比例, 源中心, 目标中心)
+    """
+    if not openpose_data or 'people' not in openpose_data or len(openpose_data['people']) == 0:
+        openpose_data['canvas_width'] = target_width
+        openpose_data['canvas_height'] = target_height
+        return openpose_data, preset_scale, preset_src_center, preset_target_center
+    
+    if not target_pose or 'people' not in target_pose or len(target_pose['people']) == 0:
+        # 如果没有 target_pose，退化为居中模式
+        result = scale_and_center_pose(openpose_data, target_width, target_height)
+        return result, 1.0, None, None
+    
+    person = openpose_data['people'][0]
+    target_person = target_pose['people'][0]
+    
+    # 获取源数据的画布尺寸
+    src_canvas_w = openpose_data.get('canvas_width', target_width)
+    src_canvas_h = openpose_data.get('canvas_height', target_height)
+    
+    # 获取源数据的原始宽高比（用于修正归一化/反归一化造成的畸变）
+    # 这个信息存储在 openpose_data 中的 'original_aspect_ratio' 字段
+    original_src_w = openpose_data.get('original_width', src_canvas_w)
+    original_src_h = openpose_data.get('original_height', src_canvas_h)
+    
+    # 获取 target_pose 的画布尺寸
+    target_canvas_w = target_pose.get('canvas_width', target_width)
+    target_canvas_h = target_pose.get('canvas_height', target_height)
+    
+    # 辅助函数：检测坐标是否已经是归一化的（0-1范围）
+    def is_normalized_coords(kps_array):
+        for i in range(0, len(kps_array), 3):
+            if i+2 >= len(kps_array):
+                break
+            x, y, score = kps_array[i], kps_array[i+1], kps_array[i+2]
+            if x is not None and y is not None and score is not None and score > 0:
+                if x > 1.0 or y > 1.0:
+                    return False
+        return True
+    
+    # 检测源数据的坐标格式
+    src_body_kps = person.get('pose_keypoints_2d', [])
+    src_is_normalized = is_normalized_coords(src_body_kps)
+    
+    # 计算宽高比修正因子
+    # 如果源数据的坐标已经经过了不等比例的归一化（如用 16:9 归一化后又用 1:1 反归一化）
+    # 需要进行修正
+    # 目标画布宽高比
+    target_aspect = target_width / target_height if target_height > 0 else 1.0
+    # 源数据原始宽高比
+    src_aspect = original_src_w / original_src_h if original_src_h > 0 else 1.0
+    
+    # 如果源数据当前画布是 1:1，但原始数据不是，说明存在畸变
+    current_aspect = src_canvas_w / src_canvas_h if src_canvas_h > 0 else 1.0
+    
+    # 计算 x 和 y 方向的修正因子
+    # 当源数据从 16:9 (1.78) 归一化后用 1:1 反归一化时：
+    # x 方向被压缩了 (512/1920) vs y 方向 (512/1080)
+    # 需要修正：x_correction = (512/1920) / (512/1080) = 1080/1920 = 0.5625
+    # 即 x 方向需要放大 1/0.5625 = 1.78 才能恢复正确比例
+    if abs(current_aspect - src_aspect) > 0.01 and abs(current_aspect - 1.0) < 0.01:
+        # 源画布是 1:1，但原始数据不是 1:1，存在畸变
+        # x 方向的修正 = 原始宽高比
+        aspect_correction_x = src_aspect
+        aspect_correction_y = 1.0
+    else:
+        aspect_correction_x = 1.0
+        aspect_correction_y = 1.0
+    
+    # 辅助函数：收集有效关键点并返回像素坐标（在目标画布上）
+    # 同时应用宽高比修正
+    def collect_valid_points_pixels(person_data, canvas_w, canvas_h, is_normalized, output_w, output_h, 
+                                    correct_x=1.0, correct_y=1.0):
+        points = []
+        body_kps = person_data.get('pose_keypoints_2d', [])
+        for i in range(0, len(body_kps), 3):
+            if i+2 >= len(body_kps):
+                break
+            x, y, score = body_kps[i], body_kps[i+1], body_kps[i+2]
+            if x is not None and y is not None and score is not None and score > 0 and x > 0 and y > 0:
+                if is_normalized:
+                    px = x * output_w * correct_x
+                    py = y * output_h * correct_y
+                else:
+                    px = x / canvas_w * output_w * correct_x
+                    py = y / canvas_h * output_h * correct_y
+                points.append([px, py])
+        return points
+    
+    # 如果没有预设参数，计算新的（第一帧）
+    if preset_scale is None or preset_src_center is None or preset_target_center is None:
+        # 收集第一帧源骨骼的关键点（应用宽高比修正）
+        src_points_px = collect_valid_points_pixels(
+            person, src_canvas_w, src_canvas_h, src_is_normalized, target_width, target_height,
+            aspect_correction_x, aspect_correction_y)
+        
+        if len(src_points_px) == 0:
+            openpose_data['canvas_width'] = target_width
+            openpose_data['canvas_height'] = target_height
+            return openpose_data, 1.0, (0.0, 0.0), (0.0, 0.0)
+        
+        src_points_px = np.array(src_points_px)
+        
+        # 计算第一帧源骨骼的边界框和中心
+        src_min_px = src_points_px.min(axis=0)
+        src_max_px = src_points_px.max(axis=0)
+        first_src_center_px = (src_min_px + src_max_px) / 2
+        src_size_px = src_max_px - src_min_px
+        
+        # 收集目标姿态的关键点
+        target_body_kps = target_person.get('pose_keypoints_2d', [])
+        target_is_normalized = is_normalized_coords(target_body_kps)
+        target_points_px = collect_valid_points_pixels(
+            target_person, target_canvas_w, target_canvas_h, target_is_normalized, target_width, target_height)
+        
+        if len(target_points_px) == 0:
+            openpose_data['canvas_width'] = target_width
+            openpose_data['canvas_height'] = target_height
+            return openpose_data, 1.0, (0.0, 0.0), (0.0, 0.0)
+        
+        target_points_px = np.array(target_points_px)
+        
+        # 计算目标骨骼的边界框和中心
+        target_min_px = target_points_px.min(axis=0)
+        target_max_px = target_points_px.max(axis=0)
+        target_center_px = (target_min_px + target_max_px) / 2
+        target_size_px = target_max_px - target_min_px
+        
+        # 计算缩放比例（使骨骼大小匹配）
+        # 使用统一的缩放比例，保持骨骼比例不变形
+        if src_size_px[0] > 0 and src_size_px[1] > 0:
+            scale_x = target_size_px[0] / src_size_px[0]
+            scale_y = target_size_px[1] / src_size_px[1]
+            # 使用较小的缩放比例，确保骨骼不会超出目标范围
+            scale = min(scale_x, scale_y)
+        else:
+            scale = 1.0
+        
+        # 保存参数供后续帧使用
+        preset_scale = scale
+        preset_src_center = (first_src_center_px[0], first_src_center_px[1])
+        preset_target_center = (target_center_px[0], target_center_px[1])
+    
+    # 使用固定的参数
+    scale = preset_scale
+    first_src_center_x, first_src_center_y = preset_src_center
+    target_center_x, target_center_y = preset_target_center
+    
+    # 变换函数：先修正宽高比，再缩放，最后平移
+    # 公式: new_pos = (pos * correction - first_src_center) * scale + target_center
+    def transform_keypoints(kps_array, kps_is_normalized, canvas_w, canvas_h):
+        result = []
+        for i in range(0, len(kps_array), 3):
+            if i+2 >= len(kps_array):
+                break
+            x, y, score = kps_array[i], kps_array[i+1], kps_array[i+2]
+            if x is not None and y is not None and score is not None and score > 0:
+                # 1. 转换到目标画布的像素坐标
+                if kps_is_normalized:
+                    px = x * target_width
+                    py = y * target_height
+                else:
+                    px = x / canvas_w * target_width
+                    py = y / canvas_h * target_height
+                
+                # 2. 应用宽高比修正
+                px = px * aspect_correction_x
+                py = py * aspect_correction_y
+                
+                # 3. 应用缩放和位移变换
+                # 公式: new_pos = (pos - first_src_center) * scale + target_center
+                new_x = (px - first_src_center_x) * scale + target_center_x
+                new_y = (py - first_src_center_y) * scale + target_center_y
+                
+                result.extend([new_x, new_y, score])
+            else:
+                result.extend([0, 0, 0])
+        return result
+    
+    # 转换所有关键点
+    person['pose_keypoints_2d'] = transform_keypoints(
+        person.get('pose_keypoints_2d', []), src_is_normalized, src_canvas_w, src_canvas_h)
+    
+    hand_left_kps = person.get('hand_left_keypoints_2d', [])
+    hand_left_is_norm = is_normalized_coords(hand_left_kps) if hand_left_kps else True
+    person['hand_left_keypoints_2d'] = transform_keypoints(
+        hand_left_kps, hand_left_is_norm, src_canvas_w, src_canvas_h)
+    
+    hand_right_kps = person.get('hand_right_keypoints_2d', [])
+    hand_right_is_norm = is_normalized_coords(hand_right_kps) if hand_right_kps else True
+    person['hand_right_keypoints_2d'] = transform_keypoints(
+        hand_right_kps, hand_right_is_norm, src_canvas_w, src_canvas_h)
+    
+    foot_kps = person.get('foot_keypoints_2d', [])
+    foot_is_norm = is_normalized_coords(foot_kps) if foot_kps else True
+    person['foot_keypoints_2d'] = transform_keypoints(
+        foot_kps, foot_is_norm, src_canvas_w, src_canvas_h)
+    
+    openpose_data['canvas_width'] = target_width
+    openpose_data['canvas_height'] = target_height
+    
+    return openpose_data, preset_scale, preset_src_center, preset_target_center
+
+
 def scale_to_match_target_pose(openpose_data, target_pose, target_width, target_height):
     """
     将 OpenPose 数据缩放并定位到与 target_pose 相同的位置
@@ -1710,21 +2036,54 @@ def retarget_pose_main(ref_pose_json, target_pose_json, video_poses_json, target
     )
     
     result = []
-    for skeleton in retargeted_skeletons:
-        openpose_frame = internal_to_openpose_format(skeleton)
-        # 缩放并定位到与 target_pose 相同的位置（保持构图一致）
-        openpose_frame = scale_to_match_target_pose(openpose_frame, target_pose_json, target_width, target_height)
+    # 第一帧计算的缩放系数和偏移量，后续帧复用
+    first_frame_scale = None
+    first_frame_src_center = None
+    first_frame_target_center = None
+    
+    for idx, skeleton in enumerate(retargeted_skeletons):
+        openpose_frame = internal_to_openpose_format(skeleton, target_width, target_height)
+        
+        if idx == 0:
+            # 第一帧：计算缩放系数并保存
+            openpose_frame, first_frame_scale, first_frame_src_center, first_frame_target_center = \
+                scale_to_match_target_pose_with_params(
+                    openpose_frame, target_pose_json, target_width, target_height,
+                    None, None, None  # 第一帧不传入预计算参数
+                )
+        else:
+            # 后续帧：使用第一帧的缩放系数
+            openpose_frame, _, _, _ = scale_to_match_target_pose_with_params(
+                openpose_frame, target_pose_json, target_width, target_height,
+                first_frame_scale, first_frame_src_center, first_frame_target_center
+            )
+        
         result.append(openpose_frame)
     
     return result
 
 
-def internal_to_openpose_format(skeleton):
+def internal_to_openpose_format(skeleton, target_width=None, target_height=None):
     """
     将内部格式转换回 OpenPose JSON 格式
+    
+    参数:
+        skeleton: 内部格式的骨骼数据（归一化坐标 0-1）
+        target_width: 目标画布宽度（如果指定，用于将归一化坐标转换为像素坐标）
+        target_height: 目标画布高度（如果指定，用于将归一化坐标转换为像素坐标）
+    
+    说明：
+        归一化坐标是相对于原始画布（skeleton['width'], skeleton['height']）的位置。
+        注意：当原始画布宽高比与目标画布不同时，直接用目标尺寸反归一化会导致畸变。
+        因此我们保存原始尺寸信息，让后续处理函数可以进行修正。
     """
-    width = skeleton.get('width', 1024)
-    height = skeleton.get('height', 1024)
+    # 如果指定了目标尺寸，使用目标尺寸；否则使用 skeleton 自带的尺寸
+    width = target_width if target_width is not None else skeleton.get('width', 1024)
+    height = target_height if target_height is not None else skeleton.get('height', 1024)
+    
+    # 获取骨骼数据中的原始画布尺寸（用于手部坐标转换和宽高比修正）
+    skeleton_width = skeleton.get('width', width)
+    skeleton_height = skeleton.get('height', height)
     
     # 转换身体关键点 - 确保输出18个点（54个值）
     # 注意：内部格式的 keypoints_body 是归一化坐标（0-1范围），需要转换为像素坐标
@@ -1733,6 +2092,7 @@ def internal_to_openpose_format(skeleton):
     for i in range(18):  # OpenPose 标准18个点
         if i < len(body_kps) and body_kps[i] is not None and len(body_kps[i]) >= 3:
             # 将归一化坐标转换为像素坐标
+            # 归一化坐标表示相对位置，直接乘以目标尺寸即可
             x = body_kps[i][0] * width
             y = body_kps[i][1] * height
             score = body_kps[i][2]
@@ -1785,7 +2145,11 @@ def internal_to_openpose_format(skeleton):
     left_hand = skeleton.get('keypoints_left_hand', [])
     right_hand = skeleton.get('keypoints_right_hand', [])
     
-    # 处理左手 - Keypoint 中的 x, y 已经是像素坐标（经过 get_handpose_meta 处理）
+    # 手部坐标是像素坐标（基于 skeleton 的 width/height），需要缩放到目标尺寸
+    hand_scale_x = width / skeleton_width if skeleton_width > 0 else 1.0
+    hand_scale_y = height / skeleton_height if skeleton_height > 0 else 1.0
+    
+    # 处理左手 - Keypoint 中的 x, y 是像素坐标，需要缩放到目标尺寸
     hand_left_keypoints_2d = []
     if isinstance(left_hand, list) and len(left_hand) > 0:
         # 检查列表中是否有任何有效的非 None 元素
@@ -1798,14 +2162,14 @@ def internal_to_openpose_format(skeleton):
         if first_valid is not None and hasattr(first_valid, 'x'):  # Keypoint NamedTuple
             for kp in left_hand:
                 if kp is not None and kp.score > 0:
-                    # Keypoint 中的坐标是像素坐标，直接使用
-                    hand_left_keypoints_2d.extend([kp.x, kp.y, kp.score])
+                    # Keypoint 中的坐标是像素坐标，需要缩放到目标尺寸
+                    hand_left_keypoints_2d.extend([kp.x * hand_scale_x, kp.y * hand_scale_y, kp.score])
                 else:
                     hand_left_keypoints_2d.extend([0, 0, 0])
         elif first_valid is not None and isinstance(first_valid, (list, tuple)):  # 嵌套列表格式 [[x,y,score], ...]
             for kp in left_hand:
                 if kp is not None and len(kp) >= 3 and kp[2] > 0:  # score > 0
-                    hand_left_keypoints_2d.extend([kp[0], kp[1], kp[2]])
+                    hand_left_keypoints_2d.extend([kp[0] * hand_scale_x, kp[1] * hand_scale_y, kp[2]])
                 else:
                     hand_left_keypoints_2d.extend([0, 0, 0])
         elif first_valid is None:
@@ -1820,7 +2184,7 @@ def internal_to_openpose_format(skeleton):
                     else:
                         hand_left_keypoints_2d.append(0)
     
-    # 处理右手 - Keypoint 中的 x, y 已经是像素坐标（经过 get_handpose_meta 处理）
+    # 处理右手 - Keypoint 中的 x, y 是像素坐标，需要缩放到目标尺寸
     hand_right_keypoints_2d = []
     if isinstance(right_hand, list) and len(right_hand) > 0:
         # 检查列表中是否有任何有效的非 None 元素
@@ -1833,14 +2197,14 @@ def internal_to_openpose_format(skeleton):
         if first_valid is not None and hasattr(first_valid, 'x'):  # Keypoint NamedTuple
             for kp in right_hand:
                 if kp is not None and kp.score > 0:
-                    # Keypoint 中的坐标是像素坐标，直接使用
-                    hand_right_keypoints_2d.extend([kp.x, kp.y, kp.score])
+                    # Keypoint 中的坐标是像素坐标，需要缩放到目标尺寸
+                    hand_right_keypoints_2d.extend([kp.x * hand_scale_x, kp.y * hand_scale_y, kp.score])
                 else:
                     hand_right_keypoints_2d.extend([0, 0, 0])
         elif first_valid is not None and isinstance(first_valid, (list, tuple)):  # 嵌套列表格式 [[x,y,score], ...]
             for kp in right_hand:
                 if kp is not None and len(kp) >= 3 and kp[2] > 0:  # score > 0
-                    hand_right_keypoints_2d.extend([kp[0], kp[1], kp[2]])
+                    hand_right_keypoints_2d.extend([kp[0] * hand_scale_x, kp[1] * hand_scale_y, kp[2]])
                 else:
                     hand_right_keypoints_2d.extend([0, 0, 0])
         elif first_valid is None:
@@ -1870,5 +2234,9 @@ def internal_to_openpose_format(skeleton):
             "hand_left_keypoints_2d": hand_left_keypoints_2d
         }],
         "canvas_width": int(width),
-        "canvas_height": int(height)
+        "canvas_height": int(height),
+        # 保存原始尺寸信息，用于后续宽高比修正
+        # 当归一化坐标是基于不同宽高比的画布时，需要这些信息来正确还原
+        "original_width": int(skeleton_width),
+        "original_height": int(skeleton_height)
     }
