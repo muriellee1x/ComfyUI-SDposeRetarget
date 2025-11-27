@@ -219,7 +219,8 @@ def deal_hand_keypoints(hand_res, r_ratio, l_ratio, hand_score_th = 0.5):
 
 def get_scaled_pose(canvas, src_canvas, keypoints, keypoints_hand, bone_ratio_list, delta_ground_x, delta_ground_y,
                                        rescaled_src_ground_x, body_flag, id, scale_min, threshold = 0.4, hand_ratio=None, keypoints_foot=None, 
-                                       first_frame_offset_x=None, first_frame_offset_y=None):
+                                       first_frame_offset_x=None, first_frame_offset_y=None, prev_head_offsets=None,
+                                       prev_frame_body_keypoints=None):
 
     H, W = canvas
     src_H, src_W = src_canvas
@@ -290,22 +291,23 @@ def get_scaled_pose(canvas, src_canvas, keypoints, keypoints_hand, bone_ratio_li
         else:
             rescale_keypoints.append(None)
     
-    # 清除没有完整上游骨骼链的关键点
-    # 腿部骨骼链: Neck(1) -> Hip -> Knee -> Ankle
-    # 如果上游关键点无效，下游关键点也应该被清除，即使它们有 score > 0
-    # 右腿: RHip(8) <- Neck(1), RKnee(9) <- RHip(8), RAnkle(10) <- RKnee(9)
-    if not is_valid_keypoint(rescale_keypoints[1]):  # Neck 无效
-        rescale_keypoints[8] = None  # RHip
-        rescale_keypoints[11] = None  # LHip
-    if not is_valid_keypoint(rescale_keypoints[8]):  # RHip 无效
-        rescale_keypoints[9] = None  # RKnee
-    if not is_valid_keypoint(rescale_keypoints[9]):  # RKnee 无效
-        rescale_keypoints[10] = None  # RAnkle
-    # 左腿: LHip(11) <- Neck(1), LKnee(12) <- LHip(11), LAnkle(13) <- LKnee(12)
-    if not is_valid_keypoint(rescale_keypoints[11]):  # LHip 无效
-        rescale_keypoints[12] = None  # LKnee
-    if not is_valid_keypoint(rescale_keypoints[12]):  # LKnee 无效
-        rescale_keypoints[13] = None  # LAnkle
+    # 禁用级联清除逻辑，避免因Neck缺失导致Hip被清除，进而引发头部位置跳变
+    # 原逻辑：清除没有完整上游骨骼链的关键点
+    # 问题：当Neck(1)缺失时，Hip(8,11)被清除 -> 对齐基准丢失 -> 头部位置跳变
+    # 解决方案：保留所有有效的关键点，不进行级联清除
+    
+    # 以下代码已禁用：
+    # if not is_valid_keypoint(rescale_keypoints[1]):  # Neck 无效
+    #     rescale_keypoints[8] = None  # RHip
+    #     rescale_keypoints[11] = None  # LHip
+    # if not is_valid_keypoint(rescale_keypoints[8]):  # RHip 无效
+    #     rescale_keypoints[9] = None  # RKnee
+    # if not is_valid_keypoint(rescale_keypoints[9]):  # RKnee 无效
+    #     rescale_keypoints[10] = None  # RAnkle
+    # if not is_valid_keypoint(rescale_keypoints[11]):  # LHip 无效
+    #     rescale_keypoints[12] = None  # LKnee
+    # if not is_valid_keypoint(rescale_keypoints[12]):  # LKnee 无效
+    #     rescale_keypoints[13] = None  # LAnkle
 
     for idx, (k1_index, k2_index) in enumerate(limbSeq):
         # update dst_keypoints
@@ -334,23 +336,57 @@ def get_scaled_pose(canvas, src_canvas, keypoints, keypoints_hand, bone_ratio_li
         # update keypoints
         rescale_keypoints[k2_index - 1] = [end_keypoint_x, end_keypoint_y, end_score]
 
+    # ===== 骨骼链断裂检测 =====
+    # 当 Neck (索引1) 无效时，整个骨骼链都无法正确计算
+    # 因为 limbSeq 中大部分骨骼都从 Neck 出发：
+    # - [2, 3] Neck -> RShoulder
+    # - [2, 6] Neck -> LShoulder  
+    # - [2, 9] Neck -> RHip
+    # - [2, 12] Neck -> LHip
+    # - [2, 1] Neck -> Nose
+    # 标记此情况，在最后生成输出时使用前一帧的骨骼位置
+    
+    neck_idx = 1
+    neck_is_invalid = not is_valid_keypoint(rescale_keypoints[neck_idx])
+    
+    # 当前帧的头部偏移（用于兼容性）
+    current_head_offsets = {}
+
     # 计算或应用第一帧的位置偏移量
-    # 关键修复：第一帧计算偏移量，后续帧复用相同的偏移量，确保视频运动连续性
+    # 关键修复：使用更鲁棒的偏移量计算策略
     computed_offset_x = None
     computed_offset_y = None
     
-    if first_frame_offset_x is not None and first_frame_offset_y is not None:
-        # 后续帧：使用第一帧计算的偏移量
+    # 修复：确保first_frame_offset总是有效值（避免None导致的跳变）
+    if first_frame_offset_x is None:
+        first_frame_offset_x = 0
+    if first_frame_offset_y is None:
+        first_frame_offset_y = 0
+    
+    if id > 0:
+        # 后续帧：总是使用第一帧计算的偏移量（即使是0）
         delta_ground_x += first_frame_offset_x
         delta_ground_y += first_frame_offset_y
     elif id == 0:
-        # 第一帧：计算偏移量并保存
+        # 第一帧：尝试多种策略计算偏移量，确保总能得到有效值
+        # 优先级：Hip中心 > Neck > Nose
         if body_flag == 'full_body' and rescale_keypoints[8] != None and rescale_keypoints[11] != None:
+            # 策略1：使用Hip中心（最稳定）
             computed_offset_x = (rescale_keypoints[8][0] + rescale_keypoints[11][0]) / 2 - rescaled_src_ground_x
             delta_ground_x += computed_offset_x
-        elif body_flag == 'half_body' and rescale_keypoints[1] != None:
+        elif rescale_keypoints[1] != None:
+            # 策略2：使用Neck（次优）
             computed_offset_x = rescale_keypoints[1][0] - rescaled_src_ground_x
             delta_ground_x += computed_offset_x
+        elif rescale_keypoints[0] != None:
+            # 策略3：使用Nose（兜底）
+            computed_offset_x = rescale_keypoints[0][0] - rescaled_src_ground_x
+            delta_ground_x += computed_offset_x
+        else:
+            # 策略4：如果所有关键点都无效，使用0偏移（避免None）
+            computed_offset_x = 0
+            delta_ground_x += 0
+        
         # Y 方向偏移暂时为 0（如果需要可以扩展）
         computed_offset_y = 0
 
@@ -451,12 +487,26 @@ def get_scaled_pose(canvas, src_canvas, keypoints, keypoints_hand, bone_ratio_li
     # get normalized keypoints_body
     # 注意：rescale_keypoints 是基于源画布尺度的像素坐标，需要使用 src_W, src_H 归一化
     # 同样，手部坐标也是基于源画布尺度的，所以 frame_info 的尺寸应该使用源画布尺寸
-    norm_body_keypoints = [ ]
-    for body_keypoint in rescale_keypoints:
-        if body_keypoint != None:
-            norm_body_keypoints.append([body_keypoint[0] / src_W , body_keypoint[1] / src_H, body_keypoint[2]])
-        else:
-            norm_body_keypoints.append(None)
+    
+    # ===== 骨骼链断裂修复 =====
+    # 当 Neck 无效时，整个骨骼链都无法正确计算，使用前一帧的骨骼位置
+    if neck_is_invalid and prev_frame_body_keypoints is not None:
+        # 直接使用前一帧的归一化骨骼位置
+        norm_body_keypoints = []
+        for idx, prev_kp in enumerate(prev_frame_body_keypoints):
+            if prev_kp is not None:
+                # 复制前一帧的归一化坐标
+                norm_body_keypoints.append([prev_kp[0], prev_kp[1], prev_kp[2] if len(prev_kp) >= 3 else 0.8])
+            else:
+                norm_body_keypoints.append(None)
+    else:
+        # 正常计算归一化坐标
+        norm_body_keypoints = []
+        for body_keypoint in rescale_keypoints:
+            if body_keypoint != None:
+                norm_body_keypoints.append([body_keypoint[0] / src_W , body_keypoint[1] / src_H, body_keypoint[2]])
+            else:
+                norm_body_keypoints.append(None)
 
     # 处理脚部关键点（完整的6个点）
     # 顺序: [RBigToe, RSmallToe, RHeel, LBigToe, LSmallToe, LHeel]
@@ -539,7 +589,7 @@ def get_scaled_pose(canvas, src_canvas, keypoints, keypoints_hand, bone_ratio_li
                     'keypoints_foot': norm_foot_keypoints,  # 新增：完整的6个脚部关键点
                 }
 
-    return frame_info, computed_offset_x, computed_offset_y
+    return frame_info, computed_offset_x, computed_offset_y, current_head_offsets, norm_body_keypoints
 
 
 def rescale_skeleton(H, W, keypoints, bone_ratio_list):
@@ -774,18 +824,28 @@ def write_to_poses(data_to_json, none_idx, dst_shape, bone_ratio_list, delta_gro
     first_frame_offset_x = None
     first_frame_offset_y = None
     
+    # 头部位置跳变修复：跟踪前一帧的头部偏移
+    prev_head_offsets = None
+    
+    # 骨骼链断裂修复：跟踪前一帧的完整骨骼位置
+    prev_frame_body_keypoints = None
+    
     for id in tqdm(range(length)):
 
         src_height, src_width = data_to_json[id]['height'], data_to_json[id]['width']
         width, height = dst_shape
         keypoints = data_to_json[id]['keypoints_body']
-        # 只对非手腕关键点应用 none_idx 过滤
-        # 手腕索引: 4 (RWrist) 和 7 (LWrist)
-        # 保留手腕关键点，以便后续帧可以正确计算手部骨骼
-        wrist_indices = {4, 7}
-        for idx in range(len(keypoints)):
-            if idx in none_idx and idx not in wrist_indices:
-                keypoints[idx] = None
+        
+        # 禁用 none_idx 过滤：保留所有 src 中有效的关键点，不根据 dst 的有效性进行清除
+        # 原逻辑：根据 none_idx 清除非手腕关键点
+        # 问题：即使 src 中的关键点有效，如果 dst 中对应点无效，也会被清除
+        # 解决方案：完全保留 src 中的所有有效关键点
+        # 原代码：
+        # wrist_indices = {4, 7}
+        # for idx in range(len(keypoints)):
+        #     if idx in none_idx and idx not in wrist_indices:
+        #         keypoints[idx] = None
+        
         new_keypoints = keypoints.copy()
 
         # get hand keypoints
@@ -826,17 +886,33 @@ def write_to_poses(data_to_json, none_idx, dst_shape, bone_ratio_list, delta_gro
         
         # 关键修复：第一帧计算偏移量，后续帧复用第一帧的偏移量
         # 这确保所有帧使用相同的位置变换，保持视频运动的连续性
-        frame_info, computed_offset_x, computed_offset_y = get_scaled_pose(
+        frame_info, computed_offset_x, computed_offset_y, current_head_offsets, current_body_keypoints = get_scaled_pose(
             (height, width), (src_height, src_width), new_keypoints, keypoints_hand, 
             bone_ratio_list, delta_ground_x, delta_ground_y, rescaled_src_ground_x, 
             body_flag, id, scale_min, hand_ratio=current_hand_ratio, keypoints_foot=keypoints_foot,
-            first_frame_offset_x=first_frame_offset_x, first_frame_offset_y=first_frame_offset_y
+            first_frame_offset_x=first_frame_offset_x, first_frame_offset_y=first_frame_offset_y,
+            prev_head_offsets=prev_head_offsets, prev_frame_body_keypoints=prev_frame_body_keypoints
         )
         
         # 保存第一帧的偏移量供后续帧使用
-        if id == 0 and computed_offset_x is not None:
-            first_frame_offset_x = computed_offset_x
+        # 修复：总是保存第一帧的偏移量（即使是0），确保后续帧有一致的参考
+        if id == 0:
+            first_frame_offset_x = computed_offset_x if computed_offset_x is not None else 0
             first_frame_offset_y = computed_offset_y if computed_offset_y is not None else 0
+        
+        # 头部位置跳变修复：保存当前帧的头部偏移供下一帧使用
+        # 只有当当前帧有有效的头部偏移时才更新，避免错误传播
+        if current_head_offsets and len(current_head_offsets) > 0:
+            prev_head_offsets = current_head_offsets
+        
+        # 骨骼链断裂修复：保存当前帧的骨骼位置供下一帧使用
+        # 只有当当前帧的骨骼链完整（有有效的骨骼位置）时才更新
+        if current_body_keypoints and any(kp is not None for kp in current_body_keypoints):
+            # 检查当前帧的 Neck 是否有效，只有有效时才更新前一帧的骨骼
+            # 这样可以确保 prev_frame_body_keypoints 始终保存的是"正常"帧的骨骼
+            neck_valid = current_body_keypoints[1] is not None and len(current_body_keypoints[1]) >= 3 and current_body_keypoints[1][2] > 0
+            if neck_valid:
+                prev_frame_body_keypoints = current_body_keypoints
         
         outputs.append(frame_info)
 
@@ -971,12 +1047,21 @@ def retarget_pose(src_skeleton, dst_skeleton, all_src_skeleton, src_skeleton_edi
     #     src_skeleton = fix_lack_keypoints_use_sym(src_skeleton)
     #     dst_skeleton = fix_lack_keypoints_use_sym(dst_skeleton)
 
+    # 禁用同步清除逻辑：只记录 dst 中无效的关键点，不强制清除 src 中的关键点
+    # 原逻辑：如果 src 或 dst 任一关键点无效，则两边都清除
+    # 问题：如果 video 某一帧的 Neck 无效，会把 target 的 Neck 也清除，导致对齐基准丢失
+    # 解决方案：只记录 dst 中原本就无效的关键点，保留 src 中所有有效的关键点
     none_idx = []
     for idx in range(len(dst_skeleton['keypoints_body'])):
-        if dst_skeleton['keypoints_body'][idx] == None or src_skeleton['keypoints_body'][idx] == None:
-            src_skeleton['keypoints_body'][idx] = None
-            dst_skeleton['keypoints_body'][idx] = None
+        # 只记录 dst 中原本就无效的关键点索引
+        if dst_skeleton['keypoints_body'][idx] == None:
             none_idx.append(idx)
+        # 不再强制清除 src 中的关键点
+        # 原代码：
+        # if dst_skeleton['keypoints_body'][idx] == None or src_skeleton['keypoints_body'][idx] == None:
+        #     src_skeleton['keypoints_body'][idx] = None
+        #     dst_skeleton['keypoints_body'][idx] = None
+        #     none_idx.append(idx)
 
     # get bone ratio list
     ratio_list, src_length_list, dst_length_list = [], [], []
