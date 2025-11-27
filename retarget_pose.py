@@ -4,10 +4,6 @@ import math
 from typing import NamedTuple
 import copy
 import json
-try:
-    from .pose_utils.pose2d_utils import AAPoseMeta
-except ImportError:
-    AAPoseMeta = None
 
 # load skeleton name and bone lines
 keypoint_list = [
@@ -966,14 +962,14 @@ def retarget_pose(src_skeleton, dst_skeleton, all_src_skeleton, src_skeleton_edi
     dst_body_flag = check_full_body(dst_skeleton['keypoints_body'], threshold)
     src_body_flag = check_full_body(src_skeleton_ori['keypoints_body'], threshold)
     body_flag = check_full_body_both(dst_body_flag, src_body_flag)
-    #print('body_flag: ', body_flag)
 
-    if use_edit_for_base:
-        src_skeleton_edit = fix_lack_keypoints_use_sym(src_skeleton_edit)
-        dst_skeleton_edit = fix_lack_keypoints_use_sym(dst_skeleton_edit)
-    else:
-        src_skeleton = fix_lack_keypoints_use_sym(src_skeleton)
-        dst_skeleton = fix_lack_keypoints_use_sym(dst_skeleton)
+    # 禁用对称修复：如果骨骼无效，直接保持无效状态，不进行修复
+    # if use_edit_for_base:
+    #     src_skeleton_edit = fix_lack_keypoints_use_sym(src_skeleton_edit)
+    #     dst_skeleton_edit = fix_lack_keypoints_use_sym(dst_skeleton_edit)
+    # else:
+    #     src_skeleton = fix_lack_keypoints_use_sym(src_skeleton)
+    #     dst_skeleton = fix_lack_keypoints_use_sym(dst_skeleton)
 
     none_idx = []
     for idx in range(len(dst_skeleton['keypoints_body'])):
@@ -1007,10 +1003,16 @@ def retarget_pose(src_skeleton, dst_skeleton, all_src_skeleton, src_skeleton_edi
         src_length_list.append(src_length)
         dst_length_list.append(dst_length)
     
-    # 对脚部骨骼（index 17, 18）使用固定匹配计算
-    # RBigToe (foot_kps[0]) 对应 RAnkle，LBigToe (foot_kps[3]) 对应 LAnkle
+    # 对脚部骨骼（index 17, 18）使用固定交叉映射计算
+    # 关键修复：与应用时的交叉映射保持一致（第 495-504 行）
+    # RBigToe (foot_kps[0]) 对应 LAnkle（交叉），LBigToe (foot_kps[3]) 对应 RAnkle（交叉）
     def get_foot_ratio_with_fixed_matching(skeleton, foot_kps):
-        """使用固定匹配计算脚部骨骼比例"""
+        """使用固定交叉映射计算脚部骨骼比例
+        
+        注意：使用交叉映射，与应用逻辑保持一致
+        - 右脚关键点（RBigToe）对应 LAnkle（交叉）
+        - 左脚关键点（LBigToe）对应 RAnkle（交叉）
+        """
         if foot_kps is None or len(foot_kps) < 6:
             return None, None
         
@@ -1025,19 +1027,21 @@ def retarget_pose(src_skeleton, dst_skeleton, all_src_skeleton, src_skeleton_edi
         r_toe_kp = foot_kps[0]  # RBigToe
         l_toe_kp = foot_kps[3]  # LBigToe
         
-        # 计算右脚长度 (RAnkle -> RBigToe)
+        # 修复：计算右脚长度时使用交叉映射 (LAnkle -> RBigToe)
+        # 这与应用时的交叉映射保持一致（右脚关键点对应 LAnkle）
         r_foot_length = None
-        if r_ankle is not None and r_toe_kp is not None and len(r_toe_kp) >= 3 and r_toe_kp[2] > 0:
-            r_ankle_px = [r_ankle[0] * W, r_ankle[1] * H]
-            r_toe_px = [r_toe_kp[0] * W, r_toe_kp[1] * H]
-            r_foot_length = ((r_toe_px[0] - r_ankle_px[0])**2 + (r_toe_px[1] - r_ankle_px[1])**2)**0.5
-        
-        # 计算左脚长度 (LAnkle -> LBigToe)
-        l_foot_length = None
-        if l_ankle is not None and l_toe_kp is not None and len(l_toe_kp) >= 3 and l_toe_kp[2] > 0:
+        if l_ankle is not None and r_toe_kp is not None and len(r_toe_kp) >= 3 and r_toe_kp[2] > 0:
             l_ankle_px = [l_ankle[0] * W, l_ankle[1] * H]
+            r_toe_px = [r_toe_kp[0] * W, r_toe_kp[1] * H]
+            r_foot_length = ((r_toe_px[0] - l_ankle_px[0])**2 + (r_toe_px[1] - l_ankle_px[1])**2)**0.5
+        
+        # 修复：计算左脚长度时使用交叉映射 (RAnkle -> LBigToe)
+        # 这与应用时的交叉映射保持一致（左脚关键点对应 RAnkle）
+        l_foot_length = None
+        if r_ankle is not None and l_toe_kp is not None and len(l_toe_kp) >= 3 and l_toe_kp[2] > 0:
+            r_ankle_px = [r_ankle[0] * W, r_ankle[1] * H]
             l_toe_px = [l_toe_kp[0] * W, l_toe_kp[1] * H]
-            l_foot_length = ((l_toe_px[0] - l_ankle_px[0])**2 + (l_toe_px[1] - l_ankle_px[1])**2)**0.5
+            l_foot_length = ((l_toe_px[0] - r_ankle_px[0])**2 + (l_toe_px[1] - r_ankle_px[1])**2)**0.5
         
         return l_foot_length, r_foot_length  # 返回 [左脚, 右脚]
     
@@ -1082,7 +1086,6 @@ def retarget_pose(src_skeleton, dst_skeleton, all_src_skeleton, src_skeleton_edi
 
     # get global translation offset_x and offset_y
     if body_flag == 'full_body':
-        #print('use foot mark.')
         dst_ground_y = max(dst_skeleton['keypoints_body'][10][1], dst_skeleton['keypoints_body'][13][1]) * dst_skeleton[
             'height']
         # The midpoint between toe and ankle
@@ -1101,7 +1104,6 @@ def retarget_pose(src_skeleton, dst_skeleton, all_src_skeleton, src_skeleton_edi
         delta_x, delta_y = delta_ground_x, delta_ground_y
 
     else:
-        #print('use neck mark.')
         # use neck keypoint as mark
         src_neck_y = rescaled_src_skeleton_ori[1][1]
         dst_neck_y = dst_skeleton['keypoints_body'][1][1]
@@ -1121,95 +1123,6 @@ def retarget_pose(src_skeleton, dst_skeleton, all_src_skeleton, src_skeleton_edi
     output = write_to_poses(all_src_skeleton, none_idx, dst_shape, ratio_list, delta_x, delta_y,
                                 rescaled_src_ground_x, body_flag, scale_min, hand_ratio=hand_ratio)
     return output
-
-
-def get_retarget_pose(tpl_pose_meta0, refer_pose_meta, tpl_pose_metas, tql_edit_pose_meta0, refer_edit_pose_meta):
-
-    for key, value in tpl_pose_meta0.items():
-        if type(value) is np.ndarray:
-            if key in ['keypoints_left_hand', 'keypoints_right_hand']:
-                value = value * np.array([[tpl_pose_meta0["width"], tpl_pose_meta0["height"], 1.0]])
-            if not isinstance(value, list):
-                value = value.tolist()
-        tpl_pose_meta0[key] = value
-
-    for key, value in refer_pose_meta.items():
-        if type(value) is np.ndarray:
-            if key in ['keypoints_left_hand', 'keypoints_right_hand']:
-                value = value * np.array([[refer_pose_meta["width"], refer_pose_meta["height"], 1.0]])
-            if not isinstance(value, list):
-                value = value.tolist()
-        refer_pose_meta[key] = value
-
-    tpl_pose_metas_new = []
-    for meta in tpl_pose_metas:
-        for key, value in meta.items():
-            if type(value) is np.ndarray:
-                if key in ['keypoints_left_hand', 'keypoints_right_hand']:
-                    value = value * np.array([[meta["width"], meta["height"], 1.0]])
-                if not isinstance(value, list):
-                    value = value.tolist()
-            meta[key] = value
-        tpl_pose_metas_new.append(meta)
-
-    if tql_edit_pose_meta0 is not None:
-        for key, value in tql_edit_pose_meta0.items():
-            if type(value) is np.ndarray:
-                if key in ['keypoints_left_hand', 'keypoints_right_hand']:
-                    value = value * np.array([[tql_edit_pose_meta0["width"], tql_edit_pose_meta0["height"], 1.0]])
-                if not isinstance(value, list):
-                    value = value.tolist()
-            tql_edit_pose_meta0[key] = value
-    
-    if refer_edit_pose_meta is not None:
-        for key, value in refer_edit_pose_meta.items():
-            if type(value) is np.ndarray:
-                if key in ['keypoints_left_hand', 'keypoints_right_hand']:
-                    value = value * np.array([[refer_edit_pose_meta["width"], refer_edit_pose_meta["height"], 1.0]])
-                if not isinstance(value, list):
-                    value = value.tolist()
-            refer_edit_pose_meta[key] = value
-
-    retarget_tpl_pose_metas = retarget_pose(tpl_pose_meta0, refer_pose_meta, tpl_pose_metas_new, tql_edit_pose_meta0, refer_edit_pose_meta)
-
-    pose_metas = []
-    for meta in retarget_tpl_pose_metas:
-        pose_meta = AAPoseMeta()
-        width, height = meta["width"], meta["height"]
-        pose_meta.width = width
-        pose_meta.height = height
-        pose_meta.kps_body = np.array(meta["keypoints_body"])[:, :2] * (width, height)
-        pose_meta.kps_body_p = np.array(meta["keypoints_body"])[:, 2]
-
-        kps_lhand = []
-        kps_lhand_p = []
-        for each_kps_lhand in meta["keypoints_left_hand"]:
-            if each_kps_lhand is not None:
-                kps_lhand.append([each_kps_lhand.x, each_kps_lhand.y])
-                kps_lhand_p.append(each_kps_lhand.score)
-            else:
-                kps_lhand.append([None, None])
-                kps_lhand_p.append(0.0)
-
-        pose_meta.kps_lhand = np.array(kps_lhand)
-        pose_meta.kps_lhand_p = np.array(kps_lhand_p)
-
-        kps_rhand = []
-        kps_rhand_p = []
-        for each_kps_rhand in meta["keypoints_right_hand"]:
-            if each_kps_rhand is not None:
-                kps_rhand.append([each_kps_rhand.x, each_kps_rhand.y])
-                kps_rhand_p.append(each_kps_rhand.score)
-            else:
-                kps_rhand.append([None, None])
-                kps_rhand_p.append(0.0)
-
-        pose_meta.kps_rhand = np.array(kps_rhand)
-        pose_meta.kps_rhand_p = np.array(kps_rhand_p)
-
-        pose_metas.append(pose_meta)
-
-    return pose_metas
 
 
 def calculate_hand_bone_length(hand_keypoints, width, height):
@@ -1597,8 +1510,6 @@ def scale_to_match_target_pose_with_params(openpose_data, target_pose, target_wi
                                            src_aspect_ratio=None):
     """
     将 OpenPose 数据缩放并定位到与 target_pose 相同的大小和位置
-    
-    关键改进：
     1. 第一帧计算缩放比例和位置偏移，后续帧复用相同参数
     2. 同时调整骨骼大小和位置，确保与 target_pose 匹配
     3. 正确处理源数据的宽高比，避免因归一化/反归一化导致的畸变
@@ -2173,12 +2084,23 @@ def internal_to_openpose_format(skeleton, target_width=None, target_height=None)
     if isinstance(left_hand, list) and len(left_hand) > 0:
         # 检查列表中是否有任何有效的非 None 元素
         first_valid = None
+        has_any_valid = False  # 标记是否有任何有效点
+        
         for item in left_hand:
             if item is not None:
                 first_valid = item
-                break
+                # 检查是否真的有效（不只是 None，还要检查 score）
+                if hasattr(item, 'score') and item.score > 0:
+                    has_any_valid = True
+                    break
+                elif isinstance(item, (list, tuple)) and len(item) >= 3 and item[2] > 0:
+                    has_any_valid = True
+                    break
         
-        if first_valid is not None and hasattr(first_valid, 'x'):  # Keypoint NamedTuple
+        # 如果整只手都无效，输出空数组（符合 OpenPose 约定：未检测到手部时为空数组）
+        if not has_any_valid:
+            hand_left_keypoints_2d = []
+        elif first_valid is not None and hasattr(first_valid, 'x'):  # Keypoint NamedTuple
             for kp in left_hand:
                 if kp is not None and kp.score > 0:
                     # Keypoint 中的坐标是像素坐标，需要缩放到目标尺寸
@@ -2191,9 +2113,6 @@ def internal_to_openpose_format(skeleton, target_width=None, target_height=None)
                     hand_left_keypoints_2d.extend([kp[0] * hand_scale_x, kp[1] * hand_scale_y, kp[2]])
                 else:
                     hand_left_keypoints_2d.extend([0, 0, 0])
-        elif first_valid is None:
-            # 全是 None，输出全0
-            hand_left_keypoints_2d = [0, 0, 0] * 21
         else:  # 已经是 flat list 格式 [x,y,score,x,y,score,...] 或其他格式
             if isinstance(left_hand, list):
                 # 过滤掉任何 None 值
@@ -2208,12 +2127,23 @@ def internal_to_openpose_format(skeleton, target_width=None, target_height=None)
     if isinstance(right_hand, list) and len(right_hand) > 0:
         # 检查列表中是否有任何有效的非 None 元素
         first_valid = None
+        has_any_valid = False  # 标记是否有任何有效点
+        
         for item in right_hand:
             if item is not None:
                 first_valid = item
-                break
+                # 检查是否真的有效（不只是 None，还要检查 score）
+                if hasattr(item, 'score') and item.score > 0:
+                    has_any_valid = True
+                    break
+                elif isinstance(item, (list, tuple)) and len(item) >= 3 and item[2] > 0:
+                    has_any_valid = True
+                    break
         
-        if first_valid is not None and hasattr(first_valid, 'x'):  # Keypoint NamedTuple
+        # 如果整只手都无效，输出空数组（符合 OpenPose 约定：未检测到手部时为空数组）
+        if not has_any_valid:
+            hand_right_keypoints_2d = []
+        elif first_valid is not None and hasattr(first_valid, 'x'):  # Keypoint NamedTuple
             for kp in right_hand:
                 if kp is not None and kp.score > 0:
                     # Keypoint 中的坐标是像素坐标，需要缩放到目标尺寸
@@ -2226,9 +2156,6 @@ def internal_to_openpose_format(skeleton, target_width=None, target_height=None)
                     hand_right_keypoints_2d.extend([kp[0] * hand_scale_x, kp[1] * hand_scale_y, kp[2]])
                 else:
                     hand_right_keypoints_2d.extend([0, 0, 0])
-        elif first_valid is None:
-            # 全是 None，输出全0
-            hand_right_keypoints_2d = [0, 0, 0] * 21
         else:  # 已经是 flat list 格式 [x,y,score,x,y,score,...] 或其他格式
             if isinstance(right_hand, list):
                 # 过滤掉任何 None 值
@@ -2238,11 +2165,15 @@ def internal_to_openpose_format(skeleton, target_width=None, target_height=None)
                     else:
                         hand_right_keypoints_2d.append(0)
     
-    # 填充到63个值（21个点 * 3）
-    while len(hand_left_keypoints_2d) < 63:
-        hand_left_keypoints_2d.extend([0, 0, 0])
-    while len(hand_right_keypoints_2d) < 63:
-        hand_right_keypoints_2d.extend([0, 0, 0])
+    # 只有当手部数据不为空数组时，才填充到63个值（21个点 * 3）
+    # 如果是空数组（表示未检测到手部），保持为空数组
+    if len(hand_left_keypoints_2d) > 0:
+        while len(hand_left_keypoints_2d) < 63:
+            hand_left_keypoints_2d.extend([0, 0, 0])
+    
+    if len(hand_right_keypoints_2d) > 0:
+        while len(hand_right_keypoints_2d) < 63:
+            hand_right_keypoints_2d.extend([0, 0, 0])
     
     return {
         "people": [{
