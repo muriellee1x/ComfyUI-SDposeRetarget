@@ -219,8 +219,7 @@ def deal_hand_keypoints(hand_res, r_ratio, l_ratio, hand_score_th = 0.5):
 
 def get_scaled_pose(canvas, src_canvas, keypoints, keypoints_hand, bone_ratio_list, delta_ground_x, delta_ground_y,
                                        rescaled_src_ground_x, body_flag, id, scale_min, threshold = 0.4, hand_ratio=None, keypoints_foot=None, 
-                                       first_frame_offset_x=None, first_frame_offset_y=None, prev_head_offsets=None,
-                                       prev_frame_body_keypoints=None):
+                                       first_frame_offset_x=None, first_frame_offset_y=None):
 
     H, W = canvas
     src_H, src_W = src_canvas
@@ -335,22 +334,6 @@ def get_scaled_pose(canvas, src_canvas, keypoints, keypoints_hand, bone_ratio_li
 
         # update keypoints
         rescale_keypoints[k2_index - 1] = [end_keypoint_x, end_keypoint_y, end_score]
-
-    # ===== 骨骼链断裂检测 =====
-    # 当 Neck (索引1) 无效时，整个骨骼链都无法正确计算
-    # 因为 limbSeq 中大部分骨骼都从 Neck 出发：
-    # - [2, 3] Neck -> RShoulder
-    # - [2, 6] Neck -> LShoulder  
-    # - [2, 9] Neck -> RHip
-    # - [2, 12] Neck -> LHip
-    # - [2, 1] Neck -> Nose
-    # 标记此情况，在最后生成输出时使用前一帧的骨骼位置
-    
-    neck_idx = 1
-    neck_is_invalid = not is_valid_keypoint(rescale_keypoints[neck_idx])
-    
-    # 当前帧的头部偏移（用于兼容性）
-    current_head_offsets = {}
 
     # 计算或应用第一帧的位置偏移量
     # 关键修复：使用更鲁棒的偏移量计算策略
@@ -487,26 +470,12 @@ def get_scaled_pose(canvas, src_canvas, keypoints, keypoints_hand, bone_ratio_li
     # get normalized keypoints_body
     # 注意：rescale_keypoints 是基于源画布尺度的像素坐标，需要使用 src_W, src_H 归一化
     # 同样，手部坐标也是基于源画布尺度的，所以 frame_info 的尺寸应该使用源画布尺寸
-    
-    # ===== 骨骼链断裂修复 =====
-    # 当 Neck 无效时，整个骨骼链都无法正确计算，使用前一帧的骨骼位置
-    if neck_is_invalid and prev_frame_body_keypoints is not None:
-        # 直接使用前一帧的归一化骨骼位置
-        norm_body_keypoints = []
-        for idx, prev_kp in enumerate(prev_frame_body_keypoints):
-            if prev_kp is not None:
-                # 复制前一帧的归一化坐标
-                norm_body_keypoints.append([prev_kp[0], prev_kp[1], prev_kp[2] if len(prev_kp) >= 3 else 0.8])
-            else:
-                norm_body_keypoints.append(None)
-    else:
-        # 正常计算归一化坐标
-        norm_body_keypoints = []
-        for body_keypoint in rescale_keypoints:
-            if body_keypoint != None:
-                norm_body_keypoints.append([body_keypoint[0] / src_W , body_keypoint[1] / src_H, body_keypoint[2]])
-            else:
-                norm_body_keypoints.append(None)
+    norm_body_keypoints = []
+    for body_keypoint in rescale_keypoints:
+        if body_keypoint != None:
+            norm_body_keypoints.append([body_keypoint[0] / src_W , body_keypoint[1] / src_H, body_keypoint[2]])
+        else:
+            norm_body_keypoints.append(None)
 
     # 处理脚部关键点（完整的6个点）
     # 顺序: [RBigToe, RSmallToe, RHeel, LBigToe, LSmallToe, LHeel]
@@ -589,7 +558,7 @@ def get_scaled_pose(canvas, src_canvas, keypoints, keypoints_hand, bone_ratio_li
                     'keypoints_foot': norm_foot_keypoints,  # 新增：完整的6个脚部关键点
                 }
 
-    return frame_info, computed_offset_x, computed_offset_y, current_head_offsets, norm_body_keypoints
+    return frame_info, computed_offset_x, computed_offset_y
 
 
 def rescale_skeleton(H, W, keypoints, bone_ratio_list):
@@ -824,12 +793,6 @@ def write_to_poses(data_to_json, none_idx, dst_shape, bone_ratio_list, delta_gro
     first_frame_offset_x = None
     first_frame_offset_y = None
     
-    # 头部位置跳变修复：跟踪前一帧的头部偏移
-    prev_head_offsets = None
-    
-    # 骨骼链断裂修复：跟踪前一帧的完整骨骼位置
-    prev_frame_body_keypoints = None
-    
     for id in tqdm(range(length)):
 
         src_height, src_width = data_to_json[id]['height'], data_to_json[id]['width']
@@ -886,12 +849,11 @@ def write_to_poses(data_to_json, none_idx, dst_shape, bone_ratio_list, delta_gro
         
         # 关键修复：第一帧计算偏移量，后续帧复用第一帧的偏移量
         # 这确保所有帧使用相同的位置变换，保持视频运动的连续性
-        frame_info, computed_offset_x, computed_offset_y, current_head_offsets, current_body_keypoints = get_scaled_pose(
+        frame_info, computed_offset_x, computed_offset_y = get_scaled_pose(
             (height, width), (src_height, src_width), new_keypoints, keypoints_hand, 
             bone_ratio_list, delta_ground_x, delta_ground_y, rescaled_src_ground_x, 
             body_flag, id, scale_min, hand_ratio=current_hand_ratio, keypoints_foot=keypoints_foot,
-            first_frame_offset_x=first_frame_offset_x, first_frame_offset_y=first_frame_offset_y,
-            prev_head_offsets=prev_head_offsets, prev_frame_body_keypoints=prev_frame_body_keypoints
+            first_frame_offset_x=first_frame_offset_x, first_frame_offset_y=first_frame_offset_y
         )
         
         # 保存第一帧的偏移量供后续帧使用
@@ -899,20 +861,6 @@ def write_to_poses(data_to_json, none_idx, dst_shape, bone_ratio_list, delta_gro
         if id == 0:
             first_frame_offset_x = computed_offset_x if computed_offset_x is not None else 0
             first_frame_offset_y = computed_offset_y if computed_offset_y is not None else 0
-        
-        # 头部位置跳变修复：保存当前帧的头部偏移供下一帧使用
-        # 只有当当前帧有有效的头部偏移时才更新，避免错误传播
-        if current_head_offsets and len(current_head_offsets) > 0:
-            prev_head_offsets = current_head_offsets
-        
-        # 骨骼链断裂修复：保存当前帧的骨骼位置供下一帧使用
-        # 只有当当前帧的骨骼链完整（有有效的骨骼位置）时才更新
-        if current_body_keypoints and any(kp is not None for kp in current_body_keypoints):
-            # 检查当前帧的 Neck 是否有效，只有有效时才更新前一帧的骨骼
-            # 这样可以确保 prev_frame_body_keypoints 始终保存的是"正常"帧的骨骼
-            neck_valid = current_body_keypoints[1] is not None and len(current_body_keypoints[1]) >= 3 and current_body_keypoints[1][2] > 0
-            if neck_valid:
-                prev_frame_body_keypoints = current_body_keypoints
         
         outputs.append(frame_info)
 
@@ -2005,6 +1953,331 @@ def scale_to_match_target_pose(openpose_data, target_pose, target_width, target_
     return openpose_data
 
 
+def detect_missing_keypoints_per_frame(video_poses_json, score_threshold=0.3):
+    """
+    检测每一帧中缺失的骨骼点（在插值之前调用）
+    
+    参数:
+        video_poses_json: OpenPose JSON 格式的视频帧列表
+        score_threshold: 置信度阈值，低于此值视为无效/缺失
+    
+    返回:
+        每帧缺失骨骼点索引的列表 [[frame0_missing_indices], [frame1_missing_indices], ...]
+        索引范围：0-19 对应 keypoints_body 的 20 个点
+    """
+    missing_keypoints_per_frame = []
+    
+    for frame_data in video_poses_json:
+        missing_indices = set()
+        
+        if not frame_data or 'people' not in frame_data or len(frame_data['people']) == 0:
+            # 整帧都缺失，标记所有骨骼点
+            missing_indices = set(range(20))  # 0-19 共20个身体骨骼点
+        else:
+            person = frame_data['people'][0]
+            body_kps = person.get('pose_keypoints_2d', [])
+            
+            # 检查 OpenPose 18 个身体关键点
+            for i in range(18):
+                if i * 3 + 2 < len(body_kps):
+                    x = body_kps[i * 3]
+                    y = body_kps[i * 3 + 1]
+                    score = body_kps[i * 3 + 2]
+                    
+                    # 检查是否缺失：score 低于阈值，或坐标无效（接近原点）
+                    if score <= score_threshold or (abs(x) < 0.01 and abs(y) < 0.01):
+                        missing_indices.add(i)
+                else:
+                    missing_indices.add(i)
+            
+            # 检查脚趾点 (内部格式中 18 = LToe, 19 = RToe)
+            foot_kps = person.get('foot_keypoints_2d', [])
+            
+            # LToe 对应 foot_kps[9:12] (LBigToe - 索引3*3=9, 10, 11)
+            if len(foot_kps) >= 12:
+                left_score = foot_kps[11]
+                left_x = foot_kps[9]
+                left_y = foot_kps[10]
+                if left_score <= score_threshold or (abs(left_x) < 0.01 and abs(left_y) < 0.01):
+                    missing_indices.add(18)
+            else:
+                missing_indices.add(18)
+            
+            # RToe 对应 foot_kps[0:3] (RBigToe - 索引0, 1, 2)
+            if len(foot_kps) >= 3:
+                right_score = foot_kps[2]
+                right_x = foot_kps[0]
+                right_y = foot_kps[1]
+                if right_score <= score_threshold or (abs(right_x) < 0.01 and abs(right_y) < 0.01):
+                    missing_indices.add(19)
+            else:
+                missing_indices.add(19)
+        
+        missing_keypoints_per_frame.append(missing_indices)
+    
+    return missing_keypoints_per_frame
+
+
+def apply_missing_keypoints_mask(retargeted_results, missing_keypoints_per_frame):
+    """
+    将原本缺失的骨骼点在 retarget 结果中标记为不可见（score=0）
+    
+    这个函数在 retarget 完成后调用，确保原本视频中没有推理出的骨骼在输出时也不会被绘制。
+    
+    参数:
+        retargeted_results: retarget 后的 OpenPose JSON 格式数据列表
+        missing_keypoints_per_frame: 每帧缺失骨骼点索引的集合列表
+    
+    返回:
+        修改后的 retargeted_results（原地修改）
+    """
+    for frame_idx, openpose_frame in enumerate(retargeted_results):
+        if frame_idx >= len(missing_keypoints_per_frame):
+            continue
+        
+        missing_indices = missing_keypoints_per_frame[frame_idx]
+        
+        if not openpose_frame or 'people' not in openpose_frame or len(openpose_frame['people']) == 0:
+            continue
+        
+        person = openpose_frame['people'][0]
+        body_kps = person.get('pose_keypoints_2d', [])
+        
+        # 将缺失的身体关键点 score 设为 0
+        for idx in missing_indices:
+            if idx < 18 and idx * 3 + 2 < len(body_kps):
+                # 保留坐标（用于调试），但将 score 设为 0
+                body_kps[idx * 3 + 2] = 0
+        
+        # 处理脚趾点（索引 18, 19 对应 foot_keypoints_2d）
+        foot_kps = person.get('foot_keypoints_2d', [])
+        
+        if 18 in missing_indices and len(foot_kps) >= 12:
+            # LToe (索引 18) 对应 foot_kps[9:12]
+            foot_kps[11] = 0  # 设置 score = 0
+        
+        if 19 in missing_indices and len(foot_kps) >= 3:
+            # RToe (索引 19) 对应 foot_kps[0:3]
+            foot_kps[2] = 0  # 设置 score = 0
+        
+        person['pose_keypoints_2d'] = body_kps
+        person['foot_keypoints_2d'] = foot_kps
+    
+    return retargeted_results
+
+
+def apply_missing_keypoints_mask_with_indices(retargeted_results, missing_keypoints_per_frame, valid_frame_indices):
+    """
+    将原本缺失的骨骼点在 retarget 结果中标记为不可见（score=0）
+    使用 valid_frame_indices 来正确对应原始帧索引
+    
+    这个函数在 retarget 完成后调用，确保原本视频中没有推理出的骨骼在输出时也不会被绘制。
+    
+    参数:
+        retargeted_results: retarget 后的 OpenPose JSON 格式数据列表
+        missing_keypoints_per_frame: 原始视频每帧缺失骨骼点索引的集合列表
+        valid_frame_indices: retargeted_results 中每帧对应的原始帧索引
+    
+    返回:
+        修改后的 retargeted_results（原地修改）
+    """
+    for result_idx, openpose_frame in enumerate(retargeted_results):
+        # 获取该 retarget 帧对应的原始帧索引
+        if result_idx >= len(valid_frame_indices):
+            continue
+        
+        original_frame_idx = valid_frame_indices[result_idx]
+        
+        if original_frame_idx >= len(missing_keypoints_per_frame):
+            continue
+        
+        # 使用原始帧索引获取缺失的骨骼点
+        missing_indices = missing_keypoints_per_frame[original_frame_idx]
+        
+        if not openpose_frame or 'people' not in openpose_frame or len(openpose_frame['people']) == 0:
+            continue
+        
+        person = openpose_frame['people'][0]
+        body_kps = person.get('pose_keypoints_2d', [])
+        
+        # 将缺失的身体关键点 score 设为 0
+        for idx in missing_indices:
+            if idx < 18 and idx * 3 + 2 < len(body_kps):
+                # 保留坐标（用于调试），但将 score 设为 0
+                body_kps[idx * 3 + 2] = 0
+        
+        # 处理脚趾点（索引 18, 19 对应 foot_keypoints_2d）
+        foot_kps = person.get('foot_keypoints_2d', [])
+        
+        if 18 in missing_indices and len(foot_kps) >= 12:
+            # LToe (索引 18) 对应 foot_kps[9:12]
+            foot_kps[11] = 0  # 设置 score = 0
+        
+        if 19 in missing_indices and len(foot_kps) >= 3:
+            # RToe (索引 19) 对应 foot_kps[0:3]
+            foot_kps[2] = 0  # 设置 score = 0
+        
+        person['pose_keypoints_2d'] = body_kps
+        person['foot_keypoints_2d'] = foot_kps
+    
+    return retargeted_results
+
+
+def interpolate_missing_keypoints(all_skeletons, keypoint_indices, score_threshold=0.3):
+    """
+    对缺失的关键点进行前后帧插值补充
+    
+    参数:
+        all_skeletons: 所有帧的骨骼数据列表（内部格式）
+        keypoint_indices: 需要检查和插值的关键点索引列表，如 [1, 8, 11] 表示 Neck, RHip, LHip
+        score_threshold: 置信度阈值，低于此值视为无效
+    
+    返回:
+        修复后的骨骼数据列表
+    """
+    if not all_skeletons or len(all_skeletons) == 0:
+        return all_skeletons
+    
+    num_frames = len(all_skeletons)
+    
+    # 对每个需要检查的关键点进行处理
+    for kp_idx in keypoint_indices:
+        # 第一步：找出所有有效帧和无效帧
+        valid_frames = []  # [(frame_idx, x, y, score), ...]
+        invalid_frames = []  # [frame_idx, ...]
+        
+        for frame_idx, skeleton in enumerate(all_skeletons):
+            if skeleton is None:
+                invalid_frames.append(frame_idx)
+                continue
+            
+            keypoints = skeleton.get('keypoints_body', [])
+            if kp_idx >= len(keypoints):
+                invalid_frames.append(frame_idx)
+                continue
+            
+            kp = keypoints[kp_idx]
+            # 检查关键点是否有效
+            if kp is not None and len(kp) >= 3 and kp[2] > score_threshold:
+                # 检查坐标是否有效（不能同时接近0）
+                if not (abs(kp[0]) < 0.01 and abs(kp[1]) < 0.01):
+                    valid_frames.append((frame_idx, kp[0], kp[1], kp[2]))
+                else:
+                    invalid_frames.append(frame_idx)
+            else:
+                invalid_frames.append(frame_idx)
+        
+        # 如果没有有效帧或没有无效帧，跳过
+        if len(valid_frames) == 0 or len(invalid_frames) == 0:
+            continue
+        
+        # 第二步：对每个无效帧进行插值
+        for inv_frame_idx in invalid_frames:
+            # 找到最近的前一个有效帧
+            prev_valid = None
+            for vf in reversed(valid_frames):
+                if vf[0] < inv_frame_idx:
+                    prev_valid = vf
+                    break
+            
+            # 找到最近的后一个有效帧
+            next_valid = None
+            for vf in valid_frames:
+                if vf[0] > inv_frame_idx:
+                    next_valid = vf
+                    break
+            
+            # 计算插值
+            interpolated_kp = None
+            
+            if prev_valid is not None and next_valid is not None:
+                # 情况1：前后都有有效帧，线性插值
+                prev_idx, prev_x, prev_y, prev_score = prev_valid
+                next_idx, next_x, next_y, next_score = next_valid
+                
+                # 计算插值权重
+                total_dist = next_idx - prev_idx
+                if total_dist > 0:
+                    t = (inv_frame_idx - prev_idx) / total_dist
+                    interp_x = prev_x + t * (next_x - prev_x)
+                    interp_y = prev_y + t * (next_y - prev_y)
+                    interp_score = min(prev_score, next_score) * 0.8  # 降低置信度标记为插值
+                    interpolated_kp = [interp_x, interp_y, interp_score]
+            
+            elif prev_valid is not None:
+                # 情况2：只有前一个有效帧，使用前帧数据
+                _, prev_x, prev_y, prev_score = prev_valid
+                interpolated_kp = [prev_x, prev_y, prev_score * 0.7]
+            
+            elif next_valid is not None:
+                # 情况3：只有后一个有效帧，使用后帧数据
+                _, next_x, next_y, next_score = next_valid
+                interpolated_kp = [next_x, next_y, next_score * 0.7]
+            
+            # 应用插值结果
+            if interpolated_kp is not None and all_skeletons[inv_frame_idx] is not None:
+                keypoints = all_skeletons[inv_frame_idx].get('keypoints_body', [])
+                # 确保列表足够长
+                while len(keypoints) <= kp_idx:
+                    keypoints.append(None)
+                keypoints[kp_idx] = interpolated_kp
+                all_skeletons[inv_frame_idx]['keypoints_body'] = keypoints
+    
+    return all_skeletons
+
+
+def interpolate_critical_keypoints(video_poses_json, score_threshold=0.3):
+    """
+    预处理函数：对视频中缺失的关键骨骼点（Neck, RHip, LHip）进行插值补充
+    
+    这个函数在 retarget 之前调用，确保关键的对齐参考点存在，
+    从而保证 retarget 后骨骼位置可以被正常推理。
+    
+    参数:
+        video_poses_json: OpenPose JSON 格式的视频帧列表
+        score_threshold: 置信度阈值
+    
+    返回:
+        修复后的 OpenPose JSON 格式视频帧列表
+    """
+    if not video_poses_json or len(video_poses_json) == 0:
+        return video_poses_json
+    
+    # 转换为内部格式进行处理
+    all_skeletons = []
+    for frame_data in video_poses_json:
+        skeleton = openpose_to_internal_format(frame_data)
+        all_skeletons.append(skeleton)
+    
+    # 关键点索引：
+    # 1 = Neck (脖子) - 骨骼链的核心节点
+    # 8 = RHip (右髋) - full_body 对齐的参考点
+    # 11 = LHip (左髋) - full_body 对齐的参考点
+    critical_keypoint_indices = [1, 8, 11]
+    
+    # 执行插值
+    all_skeletons = interpolate_missing_keypoints(
+        all_skeletons, 
+        critical_keypoint_indices, 
+        score_threshold
+    )
+    
+    # 转换回 OpenPose 格式
+    result = []
+    for skeleton in all_skeletons:
+        if skeleton is not None:
+            # 获取原始帧的画布尺寸
+            width = skeleton.get('width', 512)
+            height = skeleton.get('height', 512)
+            openpose_frame = internal_to_openpose_format(skeleton, width, height)
+            result.append(openpose_frame)
+        else:
+            # 保持空帧
+            result.append({"people": [], "canvas_width": 512, "canvas_height": 512})
+    
+    return result
+
+
 def retarget_pose_main(ref_pose_json, target_pose_json, video_poses_json, target_width=512, target_height=512, threshold=0.4):
     """
     主入口函数，处理 OpenPose JSON 格式的骨骼重映射
@@ -2021,6 +2294,16 @@ def retarget_pose_main(ref_pose_json, target_pose_json, video_poses_json, target
         重映射后的所有帧 OpenPose JSON 数据列表
     """
     
+    # ===== 第一步：记录每帧中原本缺失的骨骼点 =====
+    # 在插值之前记录，这样我们知道哪些骨骼是原本就没有检测到的
+    # 这些骨骼在 retarget 后不应该被绘制出来
+    missing_keypoints_per_frame = detect_missing_keypoints_per_frame(video_poses_json, score_threshold=threshold)
+    
+    # ===== 第二步：插值补充缺失的关键骨骼点 =====
+    # 对 Neck, RHip, LHip 进行前后帧插值，确保 retarget 对齐的稳定性
+    # 插值后的骨骼仅用于推理其他关联骨骼的位置，不会被绘制
+    video_poses_json = interpolate_critical_keypoints(video_poses_json, score_threshold=threshold)
+    
     # 转换格式
     ref_skeleton = openpose_to_internal_format(ref_pose_json)
     target_skeleton = openpose_to_internal_format(target_pose_json)
@@ -2031,11 +2314,14 @@ def retarget_pose_main(ref_pose_json, target_pose_json, video_poses_json, target
     if target_skeleton is None:
         return []
     
+    # 重要：记录每个有效帧的原始索引，用于正确应用缺失骨骼遮罩
     all_skeletons = []
+    valid_frame_indices = []  # 记录有效帧在原始 video_poses_json 中的索引
     for i, frame_data in enumerate(video_poses_json):
         skeleton = openpose_to_internal_format(frame_data)
         if skeleton is not None:
             all_skeletons.append(skeleton)
+            valid_frame_indices.append(i)  # 记录原始索引
     
     if len(all_skeletons) == 0:
         return []
@@ -2074,6 +2360,12 @@ def retarget_pose_main(ref_pose_json, target_pose_json, video_poses_json, target
             )
         
         result.append(openpose_frame)
+    
+    # ===== 第三步：应用缺失骨骼遮罩 =====
+    # 将原本在视频中没有检测到的骨骼点标记为不可见（score=0）
+    # 这样绘制骨骼时就不会画出这些点，保持与原始视频一致
+    # 重要：使用 valid_frame_indices 来正确对应原始帧索引
+    result = apply_missing_keypoints_mask_with_indices(result, missing_keypoints_per_frame, valid_frame_indices)
     
     return result
 
